@@ -2,8 +2,12 @@ syntax = "proto3";
 
 package replication;
 
+import "raft.proto";
+
 service Sequence {
   rpc Write (WriteRequest) returns (WriteResponse);
+  rpc AppendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
+  rpc RequestVote (RequestVoteRequest) returns (RequestVoteResponse);
 }
 
 message WriteRequest {
