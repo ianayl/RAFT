@@ -37,7 +37,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         self.lastApplied = 0
 
         # Volatile leader states
-        self.nextIndex = dict()    # pair of (server index, next log entry)
+        self.nextIndex = dict()    # pair of (server index, next log index)
         self.matchIndex = dict()   # pair of (server index, highest log entry replicated)
 
         self.lastHeartbeat = time.time_ns()
@@ -48,7 +48,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
     def Write(self, req, ctx):
         # If I am not the leader, redirect:
         if self.identifier != self.leader:
-            with grpc.insecure_channel(self.leader) as channel:
+            with grpc.insecure_channel(f"localhost:{self.leader}") as channel:
                 leader_stub = replication_pb2_grpc.SequenceStub(channel)
                 print(f"{self.identifier}: Not leader, redirecting to leader (f{self.leader})...")
                 try:
@@ -66,38 +66,60 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             return replication_pb2.WriteResponse(ack=ACK)
 
         # I am the leader: append to log, and ask others to append:
-        commitIndex += 1
         self.log.append(replication_pb2.LogEntry(
-            index  = self.commitIndex,
+            index  = self.commitIndex + 1,
             term   = self.currentTerm,
             opcode = "set",
             key    = req.key,
             val    = req.val
         ))
 
-        for b in self.replicas:
-            with grpc.insecure_channel(b) as channel:
-                print(f"{self.identity}: Writing to {b}...")
-                backup_server = replication_pb2_grpc.SequenceStub(channel)
-                try:
-                    res = backup_server.Write(req)
-                    if res.ack == NAK:
-                        print(f"Received NAK from {b}! NAK'ing...")
-                        return res
-                except grpc.RpcError as e:
-                    # If backup is offline, that's okay, just NAK
-                    if e.code() == grpc.StatusCode.UNAVAILABLE:
-                        print(f"Unable to reach {b}! NAK'ing...")
-                        return replication_pb2.WriteResponse(ack=NAK)
-                    # Otherwise I don't know the error, so crash:
-                    else: raise e
+        for rep_id in [ rep for rep in replicas if rep != self.identifier ]:
+            while True:
+                new_entries = [ entry for entry in self.log if entry.index >= self.nextIndex[rep_id] ]
+                if new_entries.empty(): break
 
-        # Every backup has ACK'd a write, write can proceed
-        self.store[req.key] = req.value
-        with open(self.log_file, 'a') as f:
-            f.write(f"{req.key} {req.value}\n")
-        print(f"{self.identity}: Wrote ({req.key}: {req.value}).")
-        return replication_pb2.WriteResponse(ack=ACK)
+                with grpc.insecure_channel(f"localhost:{rep_id}") as channel:
+                    print(f"{self.identity} (leader): Writing to {rep_id}...")
+                    replica_stub = replication_pb2_grpc.SequenceStub(channel)
+                    try:
+                        res = replica_stub.AppendEntries(
+                                replication_pb2.AppendEntriesRequest(
+                                    term=self.currentTerm,
+                                    leader_id=self.identifier,
+                                    prev_log_index=self.nextIndex[rep_id],
+                                    prev_log_term=self.log[self.nextIndex[rep_id]].term,
+                                    entries=new_entries,
+                                    leader_commit=self.commitIndex
+                                )
+                              )
+                        if res.success:
+                            # TODO this is sussy
+                            self.nextIndex[rep_id]  = self.commitIndex + 2;
+                            self.matchIndex[rep_id] = self.commitIndex + 1;
+                            break
+                        else:
+                            self.nextIndex[rep_id] -= 1
+                    except grpc.RpcError as e:
+                        # If replica is offline, I can just skip
+                        # TODO is this true ^^^
+                        if e.code() == grpc.StatusCode.UNAVAILABLE:
+                            print(f"Unable to reach {rep_id}! Skipping...")
+                        # Otherwise I don't know the error, so crash:
+                        else:
+                            print("ERROR:" + e)
+                        break
+        # If there exists an N such that N > commitIndex, a majority of
+        # matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N
+        potential_N = set([ n for n in self.matchIndex.values() if n > self.commitIndex and self.log[n].term == self.currentTerm ])
+        max_n, max_majority = -1, -1
+        for n in potential_N:
+            majority = sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ])
+            if majority >= (len(self.matchIndex) / 2):
+                max_n, max_majority = n, majority
+        if max_n != -1:
+            commitIndex = max_n
+            
 
     def _delete_after_index(self, index: int):
         for i in self.log:

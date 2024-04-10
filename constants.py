@@ -1,1 +1,1 @@
-KNOWN_REPLICAS = ["localhost:50051", "localhost:50052"]
+KNOWN_REPLICAS = [50051, 50052]
