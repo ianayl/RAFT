@@ -17,18 +17,14 @@ NAK="NAK"
 ACK="ACK"
 
 class SequenceServicer(replication_pb2_grpc.SequenceServicer):
-    def __init__(self, port: int, identifier: int, leader: int, replicas: list):
+    def __init__(self, identifier: int, leader: int, replicas: list):
         self.store = dict()
-        self.port = port
         self.replicas = replicas
-        # TODO these identifiers + log files WONT FLY for multiple backups!
         self.identifier = identifier
-        self.log_file = "primary.txt" if len(replicas) > 0 else f"{self.identifier}.txt"
+        self.leader = leader
+        self.log_file = f"log_{self.identifier}.txt"
         # Wipe my logfile from prior input
         with open(self.log_file, 'w') as _: print(f"Warning: clearing prior logs in {self.log_file}")  
-        # host:port can be used to distinguish between different backups
-
-        self.leader = leader
 
         # Persistent states
         self.currentTerm = 0
@@ -50,7 +46,30 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         self.leader = leader_id
 
     def Write(self, req, ctx):
-        # Try to write to every backup:
+        # If I am not the leader, redirect:
+        if self.identifier != self.leader:
+            with grpc.insecure_channel(self.leader) as channel:
+                leader_stub = replication_pb2_grpc.SequenceStub(channel)
+                print(f"{self.identifier}: Not leader, redirecting to leader (f{self.leader})...")
+                try:
+                    res = leader_stub.Write(req)
+                    if res.ack == NAK:
+                        print(f"Received NAK from {b}! NAK'ing...")
+                        return res
+                except grpc.RpcError as e:
+                    if e.code() == grpc.StatusCode.UNAVAILABLE:
+                        # TODO leader offline, trigger election instead
+                        print(f"Unable to reach {b}! NAK'ing...")
+                        return replication_pb2.WriteResponse(ack=NAK)
+                    # Otherwise I don't know the error, so crash:
+                    else: raise e
+            return replication_pb2.WriteResponse(ack=ACK)
+
+        # I am the leader: append to log, and ask others to append:
+        # self.log.append(replication_pb2.LogEntry(
+        #     index=
+        # ))
+
         for b in self.replicas:
             with grpc.insecure_channel(b) as channel:
                 print(f"{self.identity}: Writing to {b}...")
@@ -117,7 +136,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
 class Replica():
     """Base class for all replicas"""
-    def __init__(self, port: int, identifier: int, other_replicas=KNOWN_REPLICAS, primary=False):
+    def __init__(self, port: int, other_replicas=KNOWN_REPLICAS, primary=False):
         """
         Create a replica class -- pass in a list of backups into primary_backups
         to create a primary replica. Otherwise, replicas are created as backups
@@ -127,9 +146,8 @@ class Replica():
         @param other_replicas   list of other replicas
         @param primary          is our replica a primary?
         """
-        self.port = port
         self.other_replicas = other_replicas
-        self.identifier = identifier
+        self.identifier = port    # port is identifier
         self.state = "primary" if primary else "backup"
         self._running = False
         self.leader = identifier if self.state == "primary" else None
@@ -205,9 +223,9 @@ class Replica():
     def start(self):
         """Start the replica server"""
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-        self.rpc_servicer = SequenceServicer(self.port, self.identifier, self.leader, self.other_replicas)
+        self.rpc_servicer = SequenceServicer(self.identifier, self.leader, self.other_replicas)
         replication_pb2_grpc.add_SequenceServicer_to_server(self.rpc_servicer, self.server)
-        self.server.add_insecure_port(f'[::]:{self.port}')
+        self.server.add_insecure_port(f'[::]:{self.identifier}')
 
         self._running = True
         # TODO periodically ping primary instead!
