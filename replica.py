@@ -70,16 +70,34 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         print(f"{self.identity}: Wrote ({req.key}: {req.value}).")
         return replication_pb2.WriteResponse(ack=ACK)
 
+    def _delete_after_index(index: int):
+        for i in self.log:
+            if i >= index: delete self.log[i]
+
     def AppendEntries(self, req, ctx):
+        # Reply false if term < currentTerm
         if req.term < self.currentTerm:
             return replication_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
+        # Reply false if log doesn’t contain an entry at prevLogIndex whose term matches
+        # prevLogTerm
         if self.log[req.prev_log_index].term != req.prev_log_term:
             return replication_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
-        # If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+        # If an existing entry conflicts with a new one (same index but different terms),
+        # delete the existing entry and all that follow it
         for entry in req.entries:
-            if entry.index in self.log and entry
+            if entry.index in self.log and entry.term != self.log[entry.index].term:
+                _delete_after_index(entry.index)
+
+        # Append any new entries not already in the log
+        for entry in req.entries:
+            if entry.index not in self.log: self.log[entry.index] = entry
+
+        # If leaderCommit > commitIndex, set:
+        #     commitIndex = min(leaderCommit, index of last new entry)
+        if req.leader_commit > self.commitIndex:
+            self.commitIndex = min(req.leader_commit, req.entries[-1].index)
 
     def RequestVote(self, request, context):
         # If request is from an older term, reject it
