@@ -72,9 +72,9 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         print(f"{self.identity}: Wrote ({req.key}: {req.value}).")
         return replication_pb2.WriteResponse(ack=ACK)
 
-    def _delete_after_index(index: int):
+    def _delete_after_index(self, index: int):
         for i in self.log:
-            if i >= index: delete self.log[i]
+            if i >= index: del self.log[i]
 
     def AppendEntries(self, req, ctx):
         # Reply false if term < currentTerm
@@ -90,7 +90,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         # delete the existing entry and all that follow it
         for entry in req.entries:
             if entry.index in self.log and entry.term != self.log[entry.index].term:
-                _delete_after_index(entry.index)
+                self._delete_after_index(entry.index)
 
         # Append any new entries not already in the log
         for entry in req.entries:
