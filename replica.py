@@ -4,30 +4,32 @@ import time
 from concurrent import futures
 import replication_pb2
 import replication_pb2_grpc
-import heartbeat_service_pb2
-import heartbeat_service_pb2_grpc
+# import heartbeat_service_pb2
+# import heartbeat_service_pb2_grpc
+
+from constants import KNOWN_REPLICAS
 
 # Seconds per heartbeat
-HEARTBEAT_RATE = 5
+# HEARTBEAT_RATE = 5
 
 NAK="NAK"
 ACK="ACK"
 
 class SequenceServicer(replication_pb2_grpc.SequenceServicer):
-    def __init__(self, port, identity, backups=[]):
+    def __init__(self, port, identity, replicas=[]):
         self.store = dict()
         self.port = port
-        self.backups = backups
+        self.replicas = replicas
         # TODO these identifiers + log files WONT FLY for multiple backups!
         self.identity = identity
-        self.log_file = "primary.txt" if len(backups) > 0 else f"backup.txt"
+        self.log_file = "primary.txt" if len(replicas) > 0 else f"backup.txt"
         # Wipe my logfile from prior input
         with open(self.log_file, 'w') as _: print(f"Warning: clearing prior logs in {self.log_file}")  
         # host:port can be used to distinguish between different backups
     
     def Write(self, req, ctx):
         # Try to write to every backup:
-        for b in self.backups:
+        for b in self.replicas:
             with grpc.insecure_channel(b) as channel:
                 print(f"{self.identity}: Writing to {b}...")
                 backup_server = replication_pb2_grpc.SequenceStub(channel)
@@ -54,7 +56,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
 class Replica():
     """Base class for all replicas"""
-    def __init__(self, port: int, heartbeat_port=None, primary_backups=[]):
+    def __init__(self, port: int, other_replicas=KNOWN_REPLICAS, primary=False):
         """
         Create a replica class -- pass in a list of backups into primary_backups
         to create a primary replica. Otherwise, replicas are created as backups
@@ -62,43 +64,42 @@ class Replica():
 
         @param port             port number to run on
         @param heartbeat_port   port of a heartbeat service to report to
-        @param primary_backups  a list of str's in the format "hostname:port"
-                                denoting a list of backups
+        @param primary          is our replica a primary?
         """
         self.port = port
-        self.heartbeat_port = heartbeat_port
-        self.backups = primary_backups
-        self.identity = "primary" if len(primary_backups) > 0 else "backup"
+        self.other_replicas = other_replicas
+        self.identity = "primary" if primary else "backup"
         self._running = False
 
-    def ping_heartbeat(self):
-        while self._running:
-            with grpc.insecure_channel(f"localhost:{self.heartbeat_port}") as channel:
-                heartbeat_stub = heartbeat_service_pb2_grpc.ViewServiceStub(channel)
-                try:
-                    res = heartbeat_stub.Heartbeat(heartbeat_service_pb2.HeartbeatRequest(service_identifier=self.identity))
-                except grpc.RpcError as e:
-                    # If heartbeat server is dead, simply ignore
-                    if e.code() != grpc.StatusCode.UNAVAILABLE:
-                        raise e
-                    print("Warning: unable to reach heartbeat server")
-            time.sleep(HEARTBEAT_RATE)
+    # def ping_heartbeat(self):
+    #     while self._running:
+    #         with grpc.insecure_channel(f"localhost:{self.heartbeat_port}") as channel:
+    #             heartbeat_stub = heartbeat_service_pb2_grpc.ViewServiceStub(channel)
+    #             try:
+    #                 res = heartbeat_stub.Heartbeat(heartbeat_service_pb2.HeartbeatRequest(service_identifier=self.identity))
+    #             except grpc.RpcError as e:
+    #                 # If heartbeat server is dead, simply ignore
+    #                 if e.code() != grpc.StatusCode.UNAVAILABLE:
+    #                     raise e
+    #                 print("Warning: unable to reach heartbeat server")
+    #         time.sleep(HEARTBEAT_RATE)
 
     def start(self):
         """Start the replica server"""
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
         self.rpc_servicer = SequenceServicer(self.port, self.identity,
-                                             backups=self.backups)
+                                             replicas=self.other_replicas)
         replication_pb2_grpc.add_SequenceServicer_to_server(self.rpc_servicer,
                                                             self.server)
         self.server.add_insecure_port(f'[::]:{self.port}')
 
         self._running = True
-        if self.heartbeat_port is not None:
-            heartbeat_ping_thread = threading.Thread(target=self.ping_heartbeat)
-            heartbeat_ping_thread.start()
+        # TODO periodically ping primary instead!
+        # if self.heartbeat_port is not None:
+        #     heartbeat_ping_thread = threading.Thread(target=self.ping_heartbeat)
+        #     heartbeat_ping_thread.start()
         self.server.start()
         self.server.wait_for_termination()
         self._running = False
-        if self.heartbeat_port is not None:
-            heartbeat_ping_thread.wait_for_termination()
+       #  if self.heartbeat_port is not None:
+       #      heartbeat_ping_thread.wait_for_termination()

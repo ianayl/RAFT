@@ -3,8 +3,6 @@
 import grpc
 import replication_pb2
 import replication_pb2_grpc
-import heartbeat_service_pb2
-import heartbeat_service_pb2_grpc
 
 PRIMARY_PORT = 50051
 CLIENT_LOG_FILE = "client.txt"
@@ -31,17 +29,8 @@ def manual_input():
     server_port = input_safe("> Enter port to write to: ", int)
     message_server(server_port)
 
-def manual_heartbeat():
-    server_port = input_safe("> Enter port to heartbeat server: ", int)
-    identifier = input("> Enter identifier to use: ")
-    with grpc.insecure_channel(f"localhost:{server_port}") as channel:
-        server_stub = heartbeat_service_pb2_grpc.ViewServiceStub(channel)
-        server_stub.Heartbeat(heartbeat_service_pb2.HeartbeatRequest(service_identifier=identifier))
-
-
 test_fn = [ message_primary,
-            manual_input,
-            manual_heartbeat, ]
+            manual_input ]
 
 if __name__ == '__main__':
     with open(CLIENT_LOG_FILE, 'w') as _: print(f"Warning: clearing prior logs in {CLIENT_LOG_FILE}")
