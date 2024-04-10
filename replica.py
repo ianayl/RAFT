@@ -54,7 +54,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
                 try:
                     res = leader_stub.Write(req)
                     if res.ack == NAK:
-                        print(f"Received NAK from {b}! NAK'ing...")
+                        print(f"Received NAK from {self.leader}! NAK'ing...")
                         return res
                 except grpc.RpcError as e:
                     if e.code() == grpc.StatusCode.UNAVAILABLE:
