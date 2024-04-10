@@ -16,16 +16,32 @@ NAK="NAK"
 ACK="ACK"
 
 class SequenceServicer(replication_pb2_grpc.SequenceServicer):
-    def __init__(self, port, identity, replicas=[]):
+    def __init__(self, port, identifier: int, replicas=[]):
         self.store = dict()
         self.port = port
         self.replicas = replicas
         # TODO these identifiers + log files WONT FLY for multiple backups!
-        self.identity = identity
-        self.log_file = "primary.txt" if len(replicas) > 0 else f"backup.txt"
+        self.identifier = identifier
+        self.log_file = "primary.txt" if len(replicas) > 0 else f"{self.identifier}.txt"
         # Wipe my logfile from prior input
         with open(self.log_file, 'w') as _: print(f"Warning: clearing prior logs in {self.log_file}")  
         # host:port can be used to distinguish between different backups
+
+        # Persistent states
+        self.currentTerm = 0
+        self.votedFor = None
+        self.log = []
+
+        # Volatile states
+        self.commitIndex = 0
+        self.lastApplied = 0
+
+        # Volatile leader states
+        self.nextIndex = []
+        self.matchIndex = []
+
+        # Election timeout
+        self.timeout = 10
     
     def Write(self, req, ctx):
         # Try to write to every backup:
@@ -53,6 +69,16 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         print(f"{self.identity}: Wrote ({req.key}: {req.value}).")
         return replication_pb2.WriteResponse(ack=ACK)
 
+    def RequestVote(self, request, context):
+        # If request is from an older term, reject it
+        if request.term < self.currentTerm:
+            return replication_pb2.RequestVoteResponse(term=self.currentTerm, vote_granted=False)
+        
+        # If I haven't voted yet, vote for the candidate
+        if (self.votedFor is None or self.votedFor == request.candidate_id) and \
+            (request.last_log_index >= self.commitIndex) :
+            self.voted_for = request.candidate_id
+            return replication_pb2.RequestVoteResponse(term=self.term, vote_granted=True)
 
 class Replica():
     """Base class for all replicas"""
