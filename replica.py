@@ -16,7 +16,7 @@ NAK="NAK"
 ACK="ACK"
 
 class SequenceServicer(replication_pb2_grpc.SequenceServicer):
-    def __init__(self, port, identifier: int, replicas=[]):
+    def __init__(self, port: int, identifier: int, replicas=[]):
         self.store = dict()
         self.port = port
         self.replicas = replicas
@@ -30,15 +30,16 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         # Persistent states
         self.currentTerm = 0
         self.votedFor = None
-        self.log = []
+        self.log = dict()          # pair of (log index, log entry)
+        # I assume here that the dictionaries are ordered!
 
         # Volatile states
         self.commitIndex = 0
         self.lastApplied = 0
 
         # Volatile leader states
-        self.nextIndex = []
-        self.matchIndex = []
+        self.nextIndex = dict()    # pair of (server index, next log entry)
+        self.matchIndex = dict()   # pair of (server index, highest log entry replicated)
 
         # Election timeout
         self.timeout = 10
@@ -70,7 +71,15 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         return replication_pb2.WriteResponse(ack=ACK)
 
     def AppendEntries(self, req, ctx):
-        # req.term
+        if req.term < self.currentTerm:
+            return replication_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
+
+        if self.log[req.prev_log_index].term != req.prev_log_term:
+            return replication_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
+
+        # If an existing entry conflicts with a new one (same index but different terms), delete the existing entry and all that follow it (§5.3)
+        for entry in req.entries:
+            if entry.index in self.log and entry
 
     def RequestVote(self, request, context):
         # If request is from an older term, reject it
