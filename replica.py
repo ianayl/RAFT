@@ -4,6 +4,7 @@ import time
 from concurrent import futures
 import replication_pb2
 import replication_pb2_grpc
+import random
 # import heartbeat_service_pb2
 # import heartbeat_service_pb2_grpc
 
@@ -40,8 +41,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         self.nextIndex = []
         self.matchIndex = []
 
-        # Election timeout
-        self.timeout = 10
+        self.lastHeartbeat = time.time_ns()
     
     def Write(self, req, ctx):
         # Try to write to every backup:
@@ -82,7 +82,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
 class Replica():
     """Base class for all replicas"""
-    def __init__(self, port: int, other_replicas=KNOWN_REPLICAS, primary=False):
+    def __init__(self, port: int, identifier: int, other_replicas=KNOWN_REPLICAS, primary=False):
         """
         Create a replica class -- pass in a list of backups into primary_backups
         to create a primary replica. Otherwise, replicas are created as backups
@@ -94,8 +94,16 @@ class Replica():
         """
         self.port = port
         self.other_replicas = other_replicas
-        self.identity = "primary" if primary else "backup"
+        self.identifier = identifier
+        self.state = "primary" if primary else "backup"
         self._running = False
+        self.leader = identifier if self.state == "primary" else None
+
+        # Randomize election timeout
+        random.seed(time.time_ns())
+
+        # Election timeout
+        self.timeout = random.randrange(150, 300) * 1000000 # 150-300ms converted to ns
 
     # def ping_heartbeat(self):
     #     while self._running:
@@ -109,6 +117,55 @@ class Replica():
     #                     raise e
     #                 print("Warning: unable to reach heartbeat server")
     #         time.sleep(HEARTBEAT_RATE)
+    
+    def start_election(self, server):
+        server.currentTerm += 1
+        server.votedFor = server.identifier
+        votes = 1
+        for replica in server.replicas:
+            with grpc.insecure_channel(replica) as channel:
+                replica_server = replication_pb2_grpc.SequenceStub(channel)
+                try:
+                    res = replica_server.RequestVote(replication_pb2.RequestVoteRequest(
+                        term=server.currentTerm,
+                        candidate_id=server.identifier,
+                        last_log_index=server.lastApplied
+                    ))
+                    if res.vote_granted:
+                        votes += 1
+                except grpc.RpcError as e:
+                    print(f"Error: {e.code()} - {e.details()}")
+        if votes > len(server.replicas) // 2:
+            self.state = "primary"
+            # send empty AppendEntries RPCs to all other servers
+            for replica in server.replicas:
+                with grpc.insecure_channel(replica) as channel:
+                    replica_server = replication_pb2_grpc.SequenceStub(channel)
+                    try:
+                        res = replica_server.AppendEntries(replication_pb2.AppendEntriesRequest(
+                            term=server.currentTerm,
+                            leader_id=server.identifier,
+                            prev_log_index=server.lastApplied,
+                            prev_log_term=server.currentTerm,
+                            entries=[],
+                            leader_commit=server.commitIndex
+                        ))
+                    except grpc.RpcError as e:
+                        print(f"Error: {e.code()} - {e.details()}")
+            print(f"{server.identity}: Elected primary for term {server.currentTerm}.")
+
+
+    def election_timeout(self, server):
+        """Election timeout for Raft"""
+        while self._running:
+            # Ignore election timeout if we're the primary
+            if self.state == "primary": continue
+            if time.time_ns() - server.lastHeartbeat > self.timeout:
+                self.lastHeartbeat = time.time_ns()
+                print(f"Primary timed out. Starting election.")
+                self.state = "candidate"
+                self.start_election(server)
+            # If we're a backup, we need to start an election
 
     def start(self):
         """Start the replica server"""
@@ -124,6 +181,7 @@ class Replica():
         # if self.heartbeat_port is not None:
         #     heartbeat_ping_thread = threading.Thread(target=self.ping_heartbeat)
         #     heartbeat_ping_thread.start()
+
         self.server.start()
         self.server.wait_for_termination()
         self._running = False
