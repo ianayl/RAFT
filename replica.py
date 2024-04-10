@@ -59,7 +59,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
                 except grpc.RpcError as e:
                     if e.code() == grpc.StatusCode.UNAVAILABLE:
                         # TODO leader offline, trigger election instead
-                        print(f"Unable to reach {b}! NAK'ing...")
+                        print(f"Unable to reach {self.leader}! NAK'ing...")
                         return replication_pb2.WriteResponse(ack=NAK)
                     # Otherwise I don't know the error, so crash:
                     else: raise e
@@ -74,7 +74,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             val    = req.val
         ))
 
-        for rep_id in [ rep for rep in replicas if rep != self.identifier ]:
+        for rep_id in [ rep for rep in self.replicas if rep != self.identifier ]:
             while True:
                 new_entries = [ entry for entry in self.log if entry.index >= self.nextIndex[rep_id] ]
                 if new_entries.empty(): break
@@ -177,7 +177,7 @@ class Replica():
         self.identifier = port    # port is identifier
         self.state = "primary" if primary else "backup"
         self._running = False
-        self.leader = identifier if self.state == "primary" else None
+        self.leader = self.identifier if self.state == "primary" else None
 
         # Randomize election timeout
         random.seed(time.time_ns())
