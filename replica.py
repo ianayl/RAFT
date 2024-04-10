@@ -53,22 +53,25 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         print(f"{self.identity}: Wrote ({req.key}: {req.value}).")
         return replication_pb2.WriteResponse(ack=ACK)
 
+    def AppendEntries(self, req, ctx):
+        # req.term
+
 
 class Replica():
     """Base class for all replicas"""
-    def __init__(self, port: int, other_replicas=KNOWN_REPLICAS, primary=False):
+    def __init__(self, port: int, identifier: int, other_replicas=KNOWN_REPLICAS):
         """
         Create a replica class -- pass in a list of backups into primary_backups
         to create a primary replica. Otherwise, replicas are created as backups
         by default.
 
         @param port             port number to run on
-        @param heartbeat_port   port of a heartbeat service to report to
+        @param other_replicas   list of other replicas
         @param primary          is our replica a primary?
         """
         self.port = port
         self.other_replicas = other_replicas
-        self.identity = "primary" if primary else "backup"
+        self.identifier = identifier
         self._running = False
 
     # def ping_heartbeat(self):
@@ -87,10 +90,8 @@ class Replica():
     def start(self):
         """Start the replica server"""
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-        self.rpc_servicer = SequenceServicer(self.port, self.identity,
-                                             replicas=self.other_replicas)
-        replication_pb2_grpc.add_SequenceServicer_to_server(self.rpc_servicer,
-                                                            self.server)
+        self.rpc_servicer = SequenceServicer(self.port, self.identifier, replicas=self.other_replicas)
+        replication_pb2_grpc.add_SequenceServicer_to_server(self.rpc_servicer, self.server)
         self.server.add_insecure_port(f'[::]:{self.port}')
 
         self._running = True
