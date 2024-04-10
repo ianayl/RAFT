@@ -193,8 +193,9 @@ class Replica():
                         votes += 1
                 except grpc.RpcError as e:
                     print(f"Error: {e.code()} - {e.details()}")
+        
         if votes > len(server.replicas) // 2:
-            self.state = "primary"
+            server.leader = server.identifier
             # send empty AppendEntries RPCs to all other servers
             for replica in server.replicas:
                 with grpc.insecure_channel(replica) as channel:
@@ -217,11 +218,10 @@ class Replica():
         """Election timeout for Raft"""
         while self._running:
             # Ignore election timeout if we're the primary
-            if self.state == "primary": continue
+            if server.leader == server.identifier: continue
             if time.time_ns() - server.lastHeartbeat > self.timeout:
-                self.lastHeartbeat = time.time_ns()
+                server.lastHeartbeat = time.time_ns()
                 print(f"Primary timed out. Starting election.")
-                self.state = "candidate"
                 self.start_election(server)
             # If we're a backup, we need to start an election
 
