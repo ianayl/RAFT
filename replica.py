@@ -66,9 +66,14 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             return replication_pb2.WriteResponse(ack=ACK)
 
         # I am the leader: append to log, and ask others to append:
-        # self.log.append(replication_pb2.LogEntry(
-        #     index=
-        # ))
+        commitIndex += 1
+        self.log.append(replication_pb2.LogEntry(
+            index  = self.commitIndex,
+            term   = self.currentTerm,
+            opcode = "set",
+            key    = req.key,
+            val    = req.val
+        ))
 
         for b in self.replicas:
             with grpc.insecure_channel(b) as channel:
