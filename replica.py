@@ -76,9 +76,9 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         
         # If I haven't voted yet, vote for the candidate
         if (self.votedFor is None or self.votedFor == request.candidate_id) and \
-            (request.last_log_index >= self.commitIndex) :
-            self.voted_for = request.candidate_id
-            return replication_pb2.RequestVoteResponse(term=self.term, vote_granted=True)
+            (request.last_log_index >= self.lastApplied):
+            self.votedFor = request.candidate_id
+            return replication_pb2.RequestVoteResponse(term=self.currentTerm, vote_granted=True)
 
 class Replica():
     """Base class for all replicas"""
