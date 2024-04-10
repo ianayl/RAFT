@@ -17,7 +17,7 @@ NAK="NAK"
 ACK="ACK"
 
 class SequenceServicer(replication_pb2_grpc.SequenceServicer):
-    def __init__(self, port: int, identifier: int, replicas=[]):
+    def __init__(self, port: int, identifier: int, leader: int, replicas: list):
         self.store = dict()
         self.port = port
         self.replicas = replicas
@@ -27,6 +27,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         # Wipe my logfile from prior input
         with open(self.log_file, 'w') as _: print(f"Warning: clearing prior logs in {self.log_file}")  
         # host:port can be used to distinguish between different backups
+
+        self.leader = leader
 
         # Persistent states
         self.currentTerm = 0
@@ -200,7 +202,7 @@ class Replica():
     def start(self):
         """Start the replica server"""
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-        self.rpc_servicer = SequenceServicer(self.port, self.identifier, replicas=self.other_replicas)
+        self.rpc_servicer = SequenceServicer(self.port, self.identifier, self.leader, self.other_replicas)
         replication_pb2_grpc.add_SequenceServicer_to_server(self.rpc_servicer, self.server)
         self.server.add_insecure_port(f'[::]:{self.port}')
 
