@@ -46,6 +46,9 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         self.lastHeartbeat = time.time_ns()
     
+    def new_leader(self, leader_id: int):
+        self.leader = leader_id
+
     def Write(self, req, ctx):
         # Try to write to every backup:
         for b in self.replicas:
