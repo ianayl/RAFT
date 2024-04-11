@@ -146,6 +146,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         # I received something from a leader, acknowledge that leader instead
         self.lastHeartbeat = time.time_ns()
         self.leader = int(req.leader_id)
+        #print(f"{self.identifier}: received heartbeat from {self.leader}")
 
         # Reply false if term < currentTerm
         if req.term < self.currentTerm:
@@ -212,8 +213,8 @@ class Replica():
         random.seed(time.time_ns())
 
         # Election timeout
-        self.timeout = random.randrange(150, 300) * 1000000 # 150-300ms converted to ns
-        self.heartbeat_rate = 50000000 # 50ms converted to ns
+        self.timeout = random.randrange(150, 300) * 1000000 * 10 # 150-300ms converted to ns
+        self.heartbeat_rate = 50000000 * 10 # 50ms converted to ns
 
     # def ping_heartbeat(self):
     #     while self._running:
@@ -299,6 +300,7 @@ class Replica():
                 server.lastHeartbeat = time.time_ns()
                 for replica in server.replicas:
                     if replica == server.identifier: continue
+                    #print(f"{server.identifier} (primary): sending heartbeat to {replica}.")
                     with grpc.insecure_channel(f"localhost:{replica}") as channel:
                         replica_server = replication_pb2_grpc.SequenceStub(channel)
                         try:
