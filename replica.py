@@ -180,7 +180,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         # If leaderCommit > commitIndex, set:
         #     commitIndex = min(leaderCommit, index of last new entry)
         if req.leader_commit > self.commitIndex:
-            self.commitIndex = min(req.leader_commit, self.log[-1].index)
+            self.commitIndex = min(req.leader_commit, list(self.log)[-1] if self.log else 0)
             print(f"{self.identifier}: Commited up to {self.commitIndex}")
 
         return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
@@ -314,6 +314,8 @@ class Replica():
                         try:
                             print(f"{server.identifier} (primary): sending heartbeat to {replica}.")
                             print(f"Prev log index: {list(server.log)[-1] if server.log else 0}")
+                            print(f"Prev log term: {server.currentTerm}")
+                            print(f"Leader commit: {server.commitIndex}")
                             res = replica_server.AppendEntries(raft_pb2.AppendEntriesRequest(
                                 term=server.currentTerm,
                                 leader_id=str(server.identifier),
