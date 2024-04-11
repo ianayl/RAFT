@@ -88,18 +88,15 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
                     print(f"{self.identifier} (leader): Writing to {rep_id}...")
                     replica_stub = replication_pb2_grpc.SequenceStub(channel)
                     try:
-                        print("sane")
                         not_stupid = raft_pb2.AppendEntriesRequest(
                                     term=self.currentTerm,
-                                    leader_id=str(self.identifier),
+                                    leader_id=f"{self.identifier}",
                                     prev_log_index=self.nextIndex[rep_id],
                                     prev_log_term=self.log[self.nextIndex[rep_id]].term,
                                     entries=new_entries,
                                     leader_commit=self.commitIndex
                                 )
-                        print("sane1")
                         res = replica_stub.AppendEntries(not_stupid)
-                        print("sane2")
                         if res.success:
                             # TODO this is sussy
                             self.nextIndex[rep_id]  = self.commitIndex + 2
@@ -114,18 +111,31 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
                             print(f"Unable to reach {rep_id}! Skipping...")
                         # Otherwise I don't know the error, so crash:
                         else:
-                            print("ERROR:" + e)
+                            print("ERROR:")
+                            print(e)
                         break
         # If there exists an N such that N > commitIndex, a majority of
         # matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N
-        potential_N = set([ n for n in self.matchIndex.values() if n > self.commitIndex and self.log[n].term == self.currentTerm ])
-        max_n, max_majority = -1, -1
-        for n in potential_N:
-            majority = sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ])
-            if majority >= (len(self.matchIndex) / 2):
-                max_n, max_majority = n, majority
-        if max_n != -1:
-            commitIndex = max_n
+        potential_N = [ n for n in self.matchIndex.values()
+                          if n > self.commitIndex and
+                             sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ]) >= (len(self.matchIndex) / 2) and
+                             self.log[n].term == self.currentTerm ]
+        if potential_N:
+            for i in range(self.commitIndex, max(potential_N) + 1):
+                if i in self.log:
+                    print(f"{self.log[i].opcode} {self.log[i].key} {self.log[i].val}")
+            self.commitIndex = max(potential_N)
+        # max_n, max_majority = -1, -1
+        # for n in potential_N:
+        #     majority = sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ])
+        #     if majority >= (len(self.matchIndex) / 2):
+        #         max_n, max_majority = n, majority
+        # if max_n != -1:
+        #     for ()
+        #         print(f"{entry.opcode} {entry.key} {entry.val}")
+        #     commitIndex = max_n
+
+        return replication_pb2.WriteResponse(ack=ACK)
             
 
     def _delete_after_index(self, index: int):
@@ -139,7 +149,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         # Reply false if log doesn’t contain an entry at prevLogIndex whose term matches
         # prevLogTerm
-        if self.log[req.prev_log_index].term != req.prev_log_term:
+        if self.log and self.log[req.prev_log_index].term != req.prev_log_term:
             return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
         # If an existing entry conflicts with a new one (same index but different terms),
@@ -150,12 +160,17 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         # Append any new entries not already in the log
         for entry in req.entries:
-            if entry.index not in self.log: self.log[entry.index] = entry
+            if entry.index not in self.log:
+                self.log[entry.index] = entry
+                # TODO add to db here
+                print(f"{entry.opcode} {entry.key} {entry.val}")
 
         # If leaderCommit > commitIndex, set:
         #     commitIndex = min(leaderCommit, index of last new entry)
         if req.leader_commit > self.commitIndex:
             self.commitIndex = min(req.leader_commit, req.entries[-1].index)
+
+        return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
 
     def RequestVote(self, request, context):
         # If request is from an older term, reject it
