@@ -145,7 +145,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
     def AppendEntries(self, req, ctx):
         # I received something from a leader, acknowledge that leader instead
         self.lastHeartbeat = time.time_ns()
-        new_leader(int(req.leader_id))
+        self.new_leader(int(req.leader_id))
 
         # Reply false if term < currentTerm
         if req.term < self.currentTerm:
