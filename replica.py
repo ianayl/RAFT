@@ -233,6 +233,7 @@ class Replica():
         server.currentTerm += 1
         server.votedFor = server.identifier
         votes = 1
+        numReplicas = len(server.replicas)
 
         # Request votes from all other servers
         for replica in server.replicas:
@@ -248,9 +249,10 @@ class Replica():
                         votes += 1
                 except grpc.RpcError as e:
                     print(f"Error: {e.code()} - {e.details()}")
+                    numReplicas -= 1
         
         # If votes > n/2, become primary
-        if votes > len(server.replicas) // 2:
+        if votes > numReplicas // 2:
             server.leader = server.identifier
             # Send empty AppendEntries RPCs to all other servers
             for replica in server.replicas:
