@@ -319,21 +319,25 @@ class Replica():
 
     def start(self):
         """Start the replica server"""
-        self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-        self.rpc_servicer = SequenceServicer(self.identifier, self.leader, self.other_replicas)
-        replication_pb2_grpc.add_SequenceServicer_to_server(self.rpc_servicer, self.server)
-        self.server.add_insecure_port(f'[::]:{self.identifier}')
+        try:
+            self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+            self.rpc_servicer = SequenceServicer(self.identifier, self.leader, self.other_replicas)
+            replication_pb2_grpc.add_SequenceServicer_to_server(self.rpc_servicer, self.server)
+            self.server.add_insecure_port(f'[::]:{self.identifier}')
 
-        self._running = True
+            self._running = True
 
-        print(self.server)
-        # Start heartbeat thread -- will send heartbeats if server ever becomes primary
-        self.heartbeat_thread = threading.Thread(target=self.primary_heartbeat, args=[self.rpc_servicer])
-        self.heartbeat_thread.start()
-        # Start watching for election timeouts
-        self.election_thread = threading.Thread(target=self.election_timeout, args=[self.rpc_servicer])
-        self.election_thread.start()
-        # Start server
-        self.server.start()
-        self.server.wait_for_termination()
-        self._running = False
+            print(self.server)
+            # Start heartbeat thread -- will send heartbeats if server ever becomes primary
+            self.heartbeat_thread = threading.Thread(target=self.primary_heartbeat, args=[self.rpc_servicer])
+            self.heartbeat_thread.start()
+            # Start watching for election timeouts
+            self.election_thread = threading.Thread(target=self.election_timeout, args=[self.rpc_servicer])
+            self.election_thread.start()
+            # Start server
+            self.server.start()
+            self.server.wait_for_termination()
+        except KeyboardInterrupt:
+            print("\nShutting down...")
+        finally:
+            self._running = False
