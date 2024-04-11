@@ -173,6 +173,9 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
 
     def RequestVote(self, request, context):
+        # Reset election timeout on vote request
+        self.lastHeartbeat = time.time_ns()
+
         # If request is from an older term, reject it
         if request.term < self.currentTerm:
             return raft_pb2.RequestVoteResponse(term=self.currentTerm, vote_granted=False)
