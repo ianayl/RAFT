@@ -7,10 +7,11 @@ import replication_pb2_grpc
 import raft_pb2
 import raft_pb2_grpc
 import random
-# import heartbeat_service_pb2
-# import heartbeat_service_pb2_grpc
+import json
 
 from constants import KNOWN_REPLICAS
+
+import utils
 
 # Seconds per heartbeat
 # HEARTBEAT_RATE = 5
@@ -19,23 +20,25 @@ NAK="NAK"
 ACK="ACK"
 
 class SequenceServicer(replication_pb2_grpc.SequenceServicer):
-    def __init__(self, identifier: int, leader: int, replicas: list):
-        self.store = dict()
+    def __init__(self, identifier: int, leader: int, replicas: list, old_logs: dict = dict()):
         self.replicas = replicas
         self.identifier = identifier
         self.leader = leader
-        self.log_file = f"log_{self.identifier}.txt"
-        # Wipe my logfile from prior input
-        with open(self.log_file, 'w') as _: print(f"Warning: clearing prior logs in {self.log_file}")  
 
         # Persistent states
+        self.log = old_logs          # pair of (log index, log entry)
+        # ... I assume here that the dictionaries are ordered!
         self.currentTerm = 0
+        # ... If I have a log from before, populate current term 
+        if self.log:
+            self.currentTerm = self.log[max(self.log.keys())].term
         self.votedFor = None
-        self.log = dict()          # pair of (log index, log entry)
-        # I assume here that the dictionaries are ordered!
 
         # Volatile states
         self.commitIndex = 0
+        # ... If I have a log from before, populate commitIndex 
+        if self.log:
+            self.commitIndex = max(self.log.keys())
         self.lastApplied = 0
 
         # Volatile leader states
@@ -131,6 +134,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
                 break
         else:
             print("No consensus.")
+            return replication_pb2.WriteResponse(ack=NAK)
 
         return replication_pb2.WriteResponse(ack=ACK)
 
@@ -236,19 +240,10 @@ class Replica():
         self.timeout = random.randrange(150, 300) * 1000000 * 10 # 150-300ms converted to ns
         self.heartbeat_rate = 50000000 * 10 # 50ms converted to ns
 
-    # def ping_heartbeat(self):
-    #     while self._running:
-    #         with grpc.insecure_channel(f"localhost:{self.heartbeat_port}") as channel:
-    #             heartbeat_stub = heartbeat_service_pb2_grpc.ViewServiceStub(channel)
-    #             try:
-    #                 res = heartbeat_stub.Heartbeat(heartbeat_service_pb2.HeartbeatRequest(service_identifier=self.identity))
-    #             except grpc.RpcError as e:
-    #                 # If heartbeat server is dead, simply ignore
-    #                 if e.code() != grpc.StatusCode.UNAVAILABLE:
-    #                     raise e
-    #                 print("Warning: unable to reach heartbeat server")
-    #         time.sleep(HEARTBEAT_RATE)
-    
+        # Last log entry written to the log file
+        self.last_written = -1
+        self.log_file = f"log_{self.identifier}.json"
+
     def start_election(self, server):
         # Increment term and vote for self
         server.currentTerm += 1
@@ -310,6 +305,20 @@ class Replica():
                 self.start_election(server)
             # If we're a backup, we need to start an election
 
+    def apply_committed(self, server):
+        while self._running:
+            # Save everything that's been committed in case of crash
+            if server.commitIndex > self.last_written:
+                with open(self.log_file, 'w') as log_file:
+                    new_log_file = [ utils.log_entry_to_dict(entry) for entry in server.log.values() if entry.index <= server.commitIndex ]
+                    json.dump(new_log_file, log_file)
+                self.last_written = server.commitIndex
+            # ... actually apply all committed changes
+            if server.commitIndex > server.lastApplied:
+                server.lastApplied += 1
+                to_apply = server.log[server.lastApplied]
+                print(f"### APPLYING index {to_apply.index}: {to_apply.opcode} {to_apply.key} {to_apply.val} ###")
+
     def primary_heartbeat(self, server):
         """heartbeat"""
         while self._running:
@@ -344,8 +353,17 @@ class Replica():
     def start(self):
         """Start the replica server"""
         try:
+            try:
+                # Read old logs if exists
+                with open(self.log_file, 'r') as log_file:
+                    old_logs = json.load(log_file)
+                    self.last_written = old_logs[-1]["index"]
+                    self.rpc_servicer = SequenceServicer(self.identifier, self.leader, self.other_replicas, old_logs={ entry["index"]: utils.dict_to_log_entry(entry) for entry in old_logs } )
+            except FileNotFoundError:
+                print(f"No log file for the current server {self.identifier}.")
+                self.rpc_servicer = SequenceServicer(self.identifier, self.leader, self.other_replicas)
+
             self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-            self.rpc_servicer = SequenceServicer(self.identifier, self.leader, self.other_replicas)
             replication_pb2_grpc.add_SequenceServicer_to_server(self.rpc_servicer, self.server)
             self.server.add_insecure_port(f'[::]:{self.identifier}')
 
@@ -357,6 +375,9 @@ class Replica():
             # Start watching for election timeouts
             self.election_thread = threading.Thread(target=self.election_timeout, args=[self.rpc_servicer])
             self.election_thread.start()
+            # Make sure you apply everything
+            self.apply_thread = threading.Thread(target=self.apply_committed, args=[self.rpc_servicer])
+            self.apply_thread.start()
             # Start server
             self.server.start()
             self.server.wait_for_termination()
