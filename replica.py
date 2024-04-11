@@ -95,7 +95,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
                                     term=self.currentTerm,
                                     leader_id=f"{self.identifier}",
                                     prev_log_index=self.nextIndex[rep_id] - 1,
-                                    prev_log_term=self.log[self.nextIndex[rep_id]].term,
+                                    prev_log_term=0 if self.nextIndex[rep_id] - 1 not in self.log else self.log[self.nextIndex[rep_id] - 1].term, # todo consider why it's not -1
                                     entries=new_entries,
                                     leader_commit=self.commitIndex
                                 )
