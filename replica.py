@@ -39,8 +39,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         self.lastApplied = 0
 
         # Volatile leader states
-        self.nextIndex  = { rep: self.commitIndex + 1 for rep in replicas if rep != self.identifier }  # pair of (server index, next log index)
-        self.matchIndex = { rep: 0                    for rep in replicas if rep != self.identifier }  # pair of (server index, highest log entry replicated)
+        self.nextIndex  = { rep: self.commitIndex + 1 for rep in replicas if not rep == self.identifier }  # pair of (server index, next log index)
+        self.matchIndex = { rep: 0                    for rep in replicas if not rep == self.identifier }  # pair of (server index, highest log entry replicated)
 
         self.lastHeartbeat = time.time_ns()
     
@@ -122,9 +122,13 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             numReplicated = len([ n for n in self.matchIndex.values() if n >= i ])
             if numReplicated >= len(self.replicas) // 2 and self.log[i].term == self.currentTerm:
                 self.commitIndex = i
+                print(f"Committing index {i}...")
+                self.apply_log()
                 break
+        else:
+            print("No consensus.")
 
-
+            
         # potential_N = [ n for n in self.matchIndex.values()
         #                   if n > self.commitIndex and
         #                      sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ]) >= (len(self.matchIndex) // 2) and
@@ -148,6 +152,12 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         return replication_pb2.WriteResponse(ack=ACK)
             
 
+    def apply_log(self):
+        for i in range(self.lastApplied + 1, self.commitIndex + 1):
+            # TODO apply log here
+            pass
+        self.lastApplied = self.commitIndex
+            
     def _delete_after_index(self, index: int):
         for i in self.log:
             if i >= index: del self.log[i]
@@ -158,6 +168,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         if self.leader != int(req.leader_id):
             print(f"{self.identifier}: Changing leader to {req.leader_id}")
             self.leader = int(req.leader_id)
+            self.currentTerm = req.term
         #print(f"{self.identifier}: received heartbeat from {self.leader}")
 
         if not req.entries:
@@ -293,8 +304,8 @@ class Replica():
                             print(f"Error: {e.code()} - {e.details()}")
 
             # Reset leader states
-            server.nextIndex = { replica: server.lastApplied + 1 for replica in server.replicas }
-            server.matchIndex = { replica: 0 for replica in server.replicas }
+            server.nextIndex = { replica: server.lastApplied + 1 for replica in server.replicas if replica != server.identifier}
+            server.matchIndex = { replica: 0 for replica in server.replicas if replica != server.identifier}
             print(f"{server.identifier}: Elected primary for term {server.currentTerm}.")
 
 
