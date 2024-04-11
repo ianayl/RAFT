@@ -248,7 +248,8 @@ class Replica():
                     if res.vote_granted:
                         votes += 1
                 except grpc.RpcError as e:
-                    print(f"Error: {e.code()} - {e.details()}")
+                    if e.code() != grpc.StatusCode.UNAVAILABLE:
+                        print(f"Error: {e.code()} - {e.details()}")
                     numReplicas -= 1
         
         # If votes > n/2, become primary
@@ -268,12 +269,13 @@ class Replica():
                             leader_commit=server.commitIndex
                         ))
                     except grpc.RpcError as e:
-                        print(f"Error: {e.code()} - {e.details()}")
+                        if e.code() != grpc.StatusCode.UNAVAILABLE:
+                            print(f"Error: {e.code()} - {e.details()}")
 
             # Reset leader states
             server.nextIndex = { replica: server.lastApplied + 1 for replica in server.replicas }
             server.matchIndex = { replica: 0 for replica in server.replicas }
-            print(f"{server.identity}: Elected primary for term {server.currentTerm}.")
+            print(f"{server.identifier}: Elected primary for term {server.currentTerm}.")
 
 
     def election_timeout(self, server):
@@ -309,7 +311,8 @@ class Replica():
                                 leader_commit=server.commitIndex
                             ))
                         except grpc.RpcError as e:
-                            print(f"Error: {e.code()} - {e.details()}")
+                            if e.code() != grpc.StatusCode.UNAVAILABLE:
+                                print(f"Error: {e.code()} - {e.details()}")
 
 
     def start(self):
