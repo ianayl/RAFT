@@ -321,8 +321,8 @@ class Replica():
         self._running = True
 
         # Start heartbeat
-        self.heartbeat_thread = threading.Thread(target=self.primary_heartbeat(self.server))
-        self.heartbeat_ping_thread.start()
+        self.heartbeat_thread = threading.Thread(target=self.primary_heartbeat, args=[self.server])
+        self.heartbeat_thread.start()
         # Start server
         self.server.start()
         self.server.wait_for_termination()
