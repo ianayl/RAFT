@@ -1,12 +1,10 @@
 # CS 4459 - RAFT Election Algorithm
-- A basic inventory management system using the RAFT election algorithm to ensure data consistency.
+A basic inventory management system using the RAFT election algorithm to ensure data consistency.
 
 ## Instructions
 - Run `make` to generate any missing gRPC files from the provided proto files.
-- To run the heartbeat service, run `python3 ./heartbeat_service.py`.
-- To run the backup server, run `python3 ./backup.py`.
-- To run the primary server, run `python3 ./primary.py`.
-- To run the client, run `python3 ./client.py`.
+- By default, there are 3 servers to chose from. Please modify `./constants.py` for more.
+- To run a server, run `python3 ./start_replica.py <port number>` -- A Redis database be started automatically.
 - Exit the servers by pressing `Ctrl+C`. You may need to wait up to 5 seconds for the servers to exit.
 
 ## Notes
