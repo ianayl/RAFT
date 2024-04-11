@@ -371,8 +371,7 @@ class Replica():
                 # Read old logs if exists
                 with open(self.log_file, 'r') as log_file:
                     old_logs = json.load(log_file)
-                    if old_logs:
-                        self.last_written = old_logs[-1]["index"]
+                    self.last_written = old_logs[-1]["index"]
                     self.rpc_servicer = SequenceServicer(self.identifier, self.leader, self.other_replicas, old_logs={ entry["index"]: utils.dict_to_log_entry(entry) for entry in old_logs } )
             except FileNotFoundError:
                 print(f"No log file for the current server {self.identifier}.")
