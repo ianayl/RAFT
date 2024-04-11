@@ -145,7 +145,9 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
     def AppendEntries(self, req, ctx):
         # I received something from a leader, acknowledge that leader instead
         self.lastHeartbeat = time.time_ns()
-        self.leader = int(req.leader_id)
+        if self.leader != int(req.leader_id):
+            print(f"{self.identifier}: Changing leader to {req.leader_id}")
+            self.leader = int(req.leader_id)
         #print(f"{self.identifier}: received heartbeat from {self.leader}")
 
         # Reply false if term < currentTerm
@@ -249,7 +251,7 @@ class Replica():
                     if res.vote_granted:
                         votes += 1
                 except grpc.RpcError as e:
-                    if e.code() != grpc.StatusCode.UNAVAILABLE:
+                    if e.code() != grpc.StatusCode.UNAVAILABLE and not (e.code() == grpc.StatusCode.INTERNAL and "serialize" in e.details()):
                         print(f"Error: {e.code()} - {e.details()}")
                     numReplicas -= 1
         
@@ -270,7 +272,7 @@ class Replica():
                             leader_commit=server.commitIndex
                         ))
                     except grpc.RpcError as e:
-                        if e.code() != grpc.StatusCode.UNAVAILABLE:
+                        if e.code() != grpc.StatusCode.UNAVAILABLE and not (e.code() == grpc.StatusCode.INTERNAL and "serialize" in e.details()):
                             print(f"Error: {e.code()} - {e.details()}")
 
             # Reset leader states
@@ -286,7 +288,7 @@ class Replica():
             if server.leader == server.identifier: continue
             if time.time_ns() - server.lastHeartbeat > self.timeout:
                 server.lastHeartbeat = time.time_ns()
-                print(f"Primary timed out. Starting election.")
+                print(f"Primary ({server.leader}) timed out. Starting election.")
                 self.start_election(server)
             # If we're a backup, we need to start an election
 
@@ -313,7 +315,7 @@ class Replica():
                                 leader_commit=server.commitIndex
                             ))
                         except grpc.RpcError as e:
-                            if e.code() != grpc.StatusCode.UNAVAILABLE:
+                            if e.code() != grpc.StatusCode.UNAVAILABLE and not (e.code() == grpc.StatusCode.INTERNAL and "serialize" in e.details()):
                                 print(f"Error: {e.code()} - {e.details()}")
 
 
