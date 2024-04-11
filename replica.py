@@ -202,9 +202,12 @@ class Replica():
     #         time.sleep(HEARTBEAT_RATE)
     
     def start_election(self, server):
+        # Increment term and vote for self
         server.currentTerm += 1
         server.votedFor = server.identifier
         votes = 1
+
+        # Request votes from all other servers
         for replica in server.replicas:
             with grpc.insecure_channel(replica) as channel:
                 replica_server = replication_pb2_grpc.SequenceStub(channel)
@@ -219,9 +222,10 @@ class Replica():
                 except grpc.RpcError as e:
                     print(f"Error: {e.code()} - {e.details()}")
         
+        # If votes > n/2, become primary
         if votes > len(server.replicas) // 2:
             server.leader = server.identifier
-            # send empty AppendEntries RPCs to all other servers
+            # Send empty AppendEntries RPCs to all other servers
             for replica in server.replicas:
                 with grpc.insecure_channel(replica) as channel:
                     replica_server = replication_pb2_grpc.SequenceStub(channel)
@@ -236,6 +240,10 @@ class Replica():
                         ))
                     except grpc.RpcError as e:
                         print(f"Error: {e.code()} - {e.details()}")
+
+            # Reset leader states
+            server.nextIndex = { replica: server.lastApplied + 1 for replica in server.replicas }
+            server.matchIndex = { replica: 0 for replica in server.replicas }
             print(f"{server.identity}: Elected primary for term {server.currentTerm}.")
 
 
