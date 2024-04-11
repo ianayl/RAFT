@@ -165,14 +165,14 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         # Reply false if log doesn’t contain an entry at prevLogIndex whose term matches
         # prevLogTerm
-        print(f">0: {req.prev_log_index > 0}")
-        if req.prev_log_index > 0:
-            print(f"prev_log_index: {req.prev_log_index}")
-        print(f"not in log: {req.prev_log_index not in self.log}")
-        if self.log:
-            print(f"term mismatch: {self.log[req.prev_log_index].term != req.prev_log_term}")
+        # print(f">0: {req.prev_log_index > 0}")
+        # if req.prev_log_index > 0:
+        #     print(f"prev_log_index: {req.prev_log_index}")
+        # print(f"not in log: {req.prev_log_index not in self.log}")
+        # if self.log:
+        #     print(f"term mismatch: {self.log[req.prev_log_index].term != req.prev_log_term}")
         if req.prev_log_index > 0 and (req.prev_log_index not in self.log or self.log[req.prev_log_index].term != req.prev_log_term):
-            print(f"{self.identifier}: Log does not contain entry at {req.prev_log_index} with term {req.prev_log_term}")
+            # print(f"{self.identifier}: Log does not contain entry at {req.prev_log_index} with term {req.prev_log_term}")
             return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
         # If an existing entry conflicts with a new one (same index but different terms),
