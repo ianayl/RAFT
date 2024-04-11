@@ -7,6 +7,7 @@ import replication_pb2_grpc
 import raft_pb2
 import raft_pb2_grpc
 import random
+import redis
 # import heartbeat_service_pb2
 # import heartbeat_service_pb2_grpc
 
@@ -18,9 +19,10 @@ from constants import KNOWN_REPLICAS
 NAK="NAK"
 ACK="ACK"
 
+
 class SequenceServicer(replication_pb2_grpc.SequenceServicer):
     def __init__(self, identifier: int, leader: int, replicas: list):
-        self.store = dict()
+        self.db = redis.Redis(host='localhost', port=(identifier + 100), decode_responses=True)
         self.replicas = replicas
         self.identifier = identifier
         self.leader = leader
@@ -43,9 +45,6 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         self.matchIndex = { rep: 0                    for rep in replicas if not rep == self.identifier }  # pair of (server index, highest log entry replicated)
 
         self.lastHeartbeat = time.time_ns()
-    
-    # def new_leader(self, leader_id: int):
-    #     self.leader = leader_id
 
     def Write(self, req, ctx):
         # If I am not the leader, redirect:
@@ -134,12 +133,29 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         return replication_pb2.WriteResponse(ack=ACK)
 
-    def apply_log(self):
-        for i in range(self.lastApplied + 1, self.commitIndex + 1):
-            pass
-            # TODO apply log here
-        self.lastApplied = self.commitIndex
-            
+    def Read(self, req, ctx):
+        # If not leader, redirect:
+        if self.leader != self.identifier:
+            with grpc.insecure_channel(f"localhost:{self.leader}") as channel:
+                leader_stub = replication_pb2_grpc.SequenceStub(channel)
+                print(f"{self.identifier}: Not leader, redirecting to leader (f{self.leader})...")
+                try:
+                    return leader_stub.Read(req)
+                except grpc.RpcError as e:
+                    # Forward error to client
+                    if e.code() == grpc.StatusCode.UNAVAILABLE:
+                        ctx.set_code(grpc.StatusCode.UNAVAILABLE)
+                    elif e.code() == grpc.StatusCode.NOT_FOUND:
+                        ctx.set_code(grpc.StatusCode.NOT_FOUND)
+                    # Otherwise I don't know the error, so crash:
+                    else: raise e
+        else:
+            print(f"{self.identifier}: Reading {req.key}...")
+            if self.db.exists(req.key):
+                return replication_pb2.ReadResponse(value=self.db.get(req.key))
+            else:
+                ctx.set_code(grpc.StatusCode.NOT_FOUND)
+
     def _delete_after_index(self, index: int):
         for i in self.log:
             if i >= index: del self.log[i]
@@ -164,13 +180,6 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
         # Reply false if log doesn’t contain an entry at prevLogIndex whose term matches
-        # prevLogTerm
-        # print(f">0: {req.prev_log_index > 0}")
-        # if req.prev_log_index > 0:
-        #     print(f"prev_log_index: {req.prev_log_index}")
-        # print(f"not in log: {req.prev_log_index not in self.log}")
-        # if self.log:
-        #     print(f"term mismatch: {self.log[req.prev_log_index].term != req.prev_log_term}")
         if req.prev_log_index > 0 and (req.prev_log_index not in self.log or self.log[req.prev_log_index].term != req.prev_log_term):
             # print(f"{self.identifier}: Log does not contain entry at {req.prev_log_index} with term {req.prev_log_term}")
             return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
@@ -235,19 +244,6 @@ class Replica():
         # Election timeout
         self.timeout = random.randrange(150, 300) * 1000000 * 10 # 150-300ms converted to ns
         self.heartbeat_rate = 50000000 * 10 # 50ms converted to ns
-
-    # def ping_heartbeat(self):
-    #     while self._running:
-    #         with grpc.insecure_channel(f"localhost:{self.heartbeat_port}") as channel:
-    #             heartbeat_stub = heartbeat_service_pb2_grpc.ViewServiceStub(channel)
-    #             try:
-    #                 res = heartbeat_stub.Heartbeat(heartbeat_service_pb2.HeartbeatRequest(service_identifier=self.identity))
-    #             except grpc.RpcError as e:
-    #                 # If heartbeat server is dead, simply ignore
-    #                 if e.code() != grpc.StatusCode.UNAVAILABLE:
-    #                     raise e
-    #                 print("Warning: unable to reach heartbeat server")
-    #         time.sleep(HEARTBEAT_RATE)
     
     def start_election(self, server):
         # Increment term and vote for self
@@ -316,6 +312,7 @@ class Replica():
             # Only run if leader
             if server.leader != server.identifier: continue 
 
+            # Send heartbeat to all replicas every heartbeat_rate
             if time.time_ns() - server.lastHeartbeat >= self.heartbeat_rate:
                 server.lastHeartbeat = time.time_ns()
                 for replica in server.replicas:
@@ -324,10 +321,6 @@ class Replica():
                     with grpc.insecure_channel(f"localhost:{replica}") as channel:
                         replica_server = replication_pb2_grpc.SequenceStub(channel)
                         try:
-                            # print(f"{server.identifier} (primary): sending heartbeat to {replica}.")
-                            # print(f"Prev log index: {list(server.log)[-1] if server.log else 0}")
-                            # print(f"Prev log term: {server.currentTerm}")
-                            # print(f"Leader commit: {server.commitIndex}")
                             res = replica_server.AppendEntries(raft_pb2.AppendEntriesRequest(
                                 term=server.currentTerm,
                                 leader_id=str(server.identifier),
