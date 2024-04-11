@@ -6,3 +6,5 @@ clean:
 	rm *_pb2_grpc.py
 	rm -r ./__pycache__
 	rm *.txt
+	rm *.json
+	rm *.rdb

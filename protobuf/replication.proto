@@ -6,6 +6,7 @@ import "raft.proto";
 
 service Sequence {
   rpc Write (WriteRequest) returns (WriteResponse);
+  rpc Read (ReadRequest) returns (ReadResponse);
   rpc AppendEntries (AppendEntriesRequest) returns (AppendEntriesResponse);
   rpc RequestVote (RequestVoteRequest) returns (RequestVoteResponse);
 }
@@ -17,4 +18,12 @@ message WriteRequest {
 
 message WriteResponse {
   string ack = 1;
+}
+
+message ReadRequest {
+  string key = 1;
+}
+
+message ReadResponse {
+  string value = 1;
 }

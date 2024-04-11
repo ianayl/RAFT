@@ -7,10 +7,12 @@ import replication_pb2_grpc
 import raft_pb2
 import raft_pb2_grpc
 import random
-# import heartbeat_service_pb2
-# import heartbeat_service_pb2_grpc
+import json
+import redis
 
 from constants import KNOWN_REPLICAS
+
+import utils
 
 # Seconds per heartbeat
 # HEARTBEAT_RATE = 5
@@ -18,24 +20,33 @@ from constants import KNOWN_REPLICAS
 NAK="NAK"
 ACK="ACK"
 
+# Timeouts in ms
+TIMEOUT_LOWER_BOUND = 150
+TIMEOUT_UPPER_BOUND = 300
+HEARTBEAT_RATE = 50
+
+
 class SequenceServicer(replication_pb2_grpc.SequenceServicer):
-    def __init__(self, identifier: int, leader: int, replicas: list):
-        self.store = dict()
+    def __init__(self, identifier: int, leader: int, replicas: list, old_logs: dict = dict()):
+        self.db = redis.Redis(host='localhost', port=(identifier + 100), decode_responses=True)
         self.replicas = replicas
         self.identifier = identifier
         self.leader = leader
-        self.log_file = f"log_{self.identifier}.txt"
-        # Wipe my logfile from prior input
-        with open(self.log_file, 'w') as _: print(f"Warning: clearing prior logs in {self.log_file}")  
 
         # Persistent states
+        self.log = old_logs          # pair of (log index, log entry)
+        # ... I assume here that the dictionaries are ordered!
         self.currentTerm = 0
+        # ... If I have a log from before, populate current term 
+        if self.log:
+            self.currentTerm = self.log[max(self.log.keys())].term
         self.votedFor = None
-        self.log = dict()          # pair of (log index, log entry)
-        # I assume here that the dictionaries are ordered!
 
         # Volatile states
         self.commitIndex = 0
+        # ... If I have a log from before, populate commitIndex 
+        if self.log:
+            self.commitIndex = max(self.log.keys())
         self.lastApplied = 0
 
         # Volatile leader states
@@ -43,9 +54,6 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         self.matchIndex = { rep: 0                    for rep in replicas if not rep == self.identifier }  # pair of (server index, highest log entry replicated)
 
         self.lastHeartbeat = time.time_ns()
-    
-    # def new_leader(self, leader_id: int):
-    #     self.leader = leader_id
 
     def Write(self, req, ctx):
         # If I am not the leader, redirect:
@@ -78,33 +86,37 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         for rep_id in [ rep for rep in self.replicas if rep != self.identifier ]:
             while True:
-                print("next index:", self.nextIndex)
-                print("target:", self.nextIndex[rep_id])
-                print("logs:", self.log.values())
+                # print("next index:", self.nextIndex)
+                # print("target:", self.nextIndex[rep_id])
+                # print("logs:", self.log.values())
                 new_entries = [ entry for entry in self.log.values() if entry.index >= self.nextIndex[rep_id] ]
                 # print(type(new_entries[0]))
                 # print(type(self.log[1]))
                 if not new_entries: break
 
                 with grpc.insecure_channel(f"localhost:{rep_id}") as channel:
-                    print(f"{self.identifier} (leader): Writing to {rep_id}...")
+                    print(f"{self.identifier} (leader): Writing to {rep_id} @ index {self.nextIndex[rep_id]}.")
+                    print(f"Sending entries: {list(new_entries)}")
                     replica_stub = replication_pb2_grpc.SequenceStub(channel)
                     try:
                         not_stupid = raft_pb2.AppendEntriesRequest(
                                     term=self.currentTerm,
                                     leader_id=f"{self.identifier}",
-                                    prev_log_index=self.matchIndex[rep_id],
-                                    prev_log_term=self.log[self.nextIndex[rep_id]].term,
+                                    prev_log_index=self.nextIndex[rep_id] - 1,
+                                    prev_log_term=0 if self.nextIndex[rep_id] - 1 not in self.log else self.log[self.nextIndex[rep_id] - 1].term, # todo consider why it's not -1
                                     entries=new_entries,
                                     leader_commit=self.commitIndex
                                 )
                         res = replica_stub.AppendEntries(not_stupid)
                         if res.success:
                             # TODO this is sussy
+                            print(f"AppendEntries succeeded for {rep_id}!")
                             self.nextIndex[rep_id]  = self.commitIndex + 2
                             self.matchIndex[rep_id] = self.commitIndex + 1
                             break
                         else:
+                            # If AppendEntries fails, decrement nextIndex and try again
+                            print(f"AppendEntries failed for {rep_id}! Decrementing nextIndex...")
                             self.nextIndex[rep_id] -= 1
                     except grpc.RpcError as e:
                         # If replica is offline, I can just skip
@@ -122,47 +134,45 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             numReplicated = len([ n for n in self.matchIndex.values() if n >= i ])
             if numReplicated >= len(self.replicas) // 2 and self.log[i].term == self.currentTerm:
                 self.commitIndex = i
-                print(f"Committing index {i}...")
-                self.apply_log()
+                print(f"Consensus reached: committing index {i}.")
+                print(f"Log is now {self.log}")
                 break
         else:
             print("No consensus.")
-
-            
-        # potential_N = [ n for n in self.matchIndex.values()
-        #                   if n > self.commitIndex and
-        #                      sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ]) >= (len(self.matchIndex) // 2) and
-        #                      self.log[n].term == self.currentTerm ]
-        # if potential_N:
-        #     for i in range(self.commitIndex + 1, max(potential_N) + 1):
-        #         if i in self.log:
-        #             print(f"{self.log[i].opcode} {self.log[i].key} {self.log[i].val}")
-        #     self.commitIndex = max(potential_N)
-
-        # max_n, max_majority = -1, -1
-        # for n in potential_N:
-        #     majority = sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ])
-        #     if majority >= (len(self.matchIndex) / 2):
-        #         max_n, max_majority = n, majority
-        # if max_n != -1:
-        #     for ()
-        #         print(f"{entry.opcode} {entry.key} {entry.val}")
-        #     commitIndex = max_n
+            return replication_pb2.WriteResponse(ack=NAK)
 
         return replication_pb2.WriteResponse(ack=ACK)
-            
 
-    def apply_log(self):
-        for i in range(self.lastApplied + 1, self.commitIndex + 1):
-            # TODO apply log here
-            pass
-        self.lastApplied = self.commitIndex
-            
+    def Read(self, req, ctx):
+        # If not leader, redirect:
+        if self.leader != self.identifier:
+            with grpc.insecure_channel(f"localhost:{self.leader}") as channel:
+                leader_stub = replication_pb2_grpc.SequenceStub(channel)
+                print(f"{self.identifier}: Not leader, redirecting to leader (f{self.leader})...")
+                try:
+                    return leader_stub.Read(req)
+                except grpc.RpcError as e:
+                    # Forward error to client
+                    if e.code() == grpc.StatusCode.UNAVAILABLE:
+                        ctx.set_code(grpc.StatusCode.UNAVAILABLE)
+                    elif e.code() == grpc.StatusCode.NOT_FOUND:
+                        ctx.set_code(grpc.StatusCode.NOT_FOUND)
+                    # Otherwise I don't know the error, so crash:
+                    else: raise e
+        else:
+            print(f"{self.identifier}: Reading {req.key}...")
+            if self.db.exists(req.key):
+                return replication_pb2.ReadResponse(value=self.db.get(req.key))
+            else:
+                ctx.set_code(grpc.StatusCode.NOT_FOUND)
+
     def _delete_after_index(self, index: int):
         for i in self.log:
             if i >= index: del self.log[i]
 
     def AppendEntries(self, req, ctx):
+        if req.entries:
+            print("New AppendEntries request:")
         # I received something from a leader, acknowledge that leader instead
         self.lastHeartbeat = time.time_ns()
         if self.leader != int(req.leader_id):
@@ -171,10 +181,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             self.currentTerm = req.term
         #print(f"{self.identifier}: received heartbeat from {self.leader}")
 
-        if not req.entries:
-            return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
-
-        print(f"NOTE: ({req.entries})")
+        # if not req.entries:
+        #     return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
 
         # Reply false if term < currentTerm
         if req.term < self.currentTerm:
@@ -182,9 +190,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
         # Reply false if log doesn’t contain an entry at prevLogIndex whose term matches
-        # prevLogTerm
-        if req.prev_log_index != 0 and self.log and (req.prev_log_index not in self.log or self.log[req.prev_log_index].term != req.prev_log_term):
-            print(f"{self.identifier}: {self.log} has at prev_log_index {req.prev_log_index} is term {None if req.prev_log_index not in self.log else self.log[req.prev_log_index].term} (prev_log_term is {req.prev_log_term})")
+        if req.prev_log_index > 0 and (req.prev_log_index not in self.log or self.log[req.prev_log_index].term != req.prev_log_term):
+            # print(f"{self.identifier}: Log does not contain entry at {req.prev_log_index} with term {req.prev_log_term}")
             return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
         # If an existing entry conflicts with a new one (same index but different terms),
@@ -198,12 +205,14 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             if entry.index not in self.log:
                 self.log[entry.index] = entry
                 # TODO add to db here
-                print(f"{entry.opcode} {entry.key} {entry.val}")
+                print(f"Appended new entry to log: {entry.opcode} {entry.key} {entry.val}")
 
         # If leaderCommit > commitIndex, set:
         #     commitIndex = min(leaderCommit, index of last new entry)
         if req.leader_commit > self.commitIndex:
-            self.commitIndex = min(req.leader_commit, req.entries[-1].index)
+            self.commitIndex = min(req.leader_commit, list(self.log)[-1] if self.log else 0)
+            print(f"{self.identifier}: Commited up to {self.commitIndex}")
+            print(f"{self.identifier}: Log is now {self.log}")
 
         return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
 
@@ -217,7 +226,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         
         # If I haven't voted yet, vote for the candidate
         if (self.votedFor is None or self.votedFor == request.candidate_id) and \
-            (request.last_log_index >= self.lastApplied):
+            (request.last_log_index >= list(self.log)[-1] if self.log else 0):
             self.votedFor = request.candidate_id
             return raft_pb2.RequestVoteResponse(term=self.currentTerm, vote_granted=True)
 
@@ -243,21 +252,12 @@ class Replica():
         random.seed(time.time_ns())
 
         # Election timeout
-        self.timeout = random.randrange(150, 300) * 1000000 * 10 # 150-300ms converted to ns
-        self.heartbeat_rate = 50000000 * 10 # 50ms converted to ns
+        self.timeout = random.randrange(TIMEOUT_LOWER_BOUND, TIMEOUT_UPPER_BOUND) * 1000000 * 10 # 150-300ms converted to ns, multiplied by 10 for testing
+        self.heartbeat_rate = HEARTBEAT_RATE * 1000000 * 10 # 50ms converted to ns, multiplied by 10 for testing
 
-    # def ping_heartbeat(self):
-    #     while self._running:
-    #         with grpc.insecure_channel(f"localhost:{self.heartbeat_port}") as channel:
-    #             heartbeat_stub = heartbeat_service_pb2_grpc.ViewServiceStub(channel)
-    #             try:
-    #                 res = heartbeat_stub.Heartbeat(heartbeat_service_pb2.HeartbeatRequest(service_identifier=self.identity))
-    #             except grpc.RpcError as e:
-    #                 # If heartbeat server is dead, simply ignore
-    #                 if e.code() != grpc.StatusCode.UNAVAILABLE:
-    #                     raise e
-    #                 print("Warning: unable to reach heartbeat server")
-    #         time.sleep(HEARTBEAT_RATE)
+        # Last log entry written to the log file
+        self.last_written = -1
+        self.log_file = f"log_{self.identifier}.json"
     
     def start_election(self, server):
         # Increment term and vote for self
@@ -274,13 +274,13 @@ class Replica():
                     res = replica_server.RequestVote(raft_pb2.RequestVoteRequest(
                         term=server.currentTerm,
                         candidate_id=str(server.identifier),
-                        last_log_index=server.lastApplied
+                        last_log_index=list(server.log)[-1] if server.log else 0,
                     ))
                     if res.vote_granted:
                         votes += 1
                 except grpc.RpcError as e:
                     if e.code() != grpc.StatusCode.UNAVAILABLE and not (e.code() == grpc.StatusCode.INTERNAL and "serialize" in e.details()):
-                        print(f"Error: {e.code()} - {e.details()}")
+                        print(f"Vote Request Error: {e.code()} - {e.details()}")
                     numReplicas -= 1
         
         # If votes > n/2, become primary
@@ -294,17 +294,17 @@ class Replica():
                         res = replica_server.AppendEntries(raft_pb2.AppendEntriesRequest(
                             term=server.currentTerm,
                             leader_id=str(server.identifier),
-                            prev_log_index=server.lastApplied,
+                            prev_log_index=list(server.log)[-1] if server.log else 0,
                             prev_log_term=server.currentTerm,
                             entries=[],
                             leader_commit=server.commitIndex
                         ))
                     except grpc.RpcError as e:
                         if e.code() != grpc.StatusCode.UNAVAILABLE and not (e.code() == grpc.StatusCode.INTERNAL and "serialize" in e.details()):
-                            print(f"Error: {e.code()} - {e.details()}")
+                            print(f"Leader Confirmation Error: {e.code()} - {e.details()}")
 
             # Reset leader states
-            server.nextIndex = { replica: server.lastApplied + 1 for replica in server.replicas if replica != server.identifier}
+            server.nextIndex = { replica: list(server.log)[-1] + 1 if server.log else 1 for replica in server.replicas if replica != server.identifier}
             server.matchIndex = { replica: 0 for replica in server.replicas if replica != server.identifier}
             print(f"{server.identifier}: Elected primary for term {server.currentTerm}.")
 
@@ -320,12 +320,29 @@ class Replica():
                 self.start_election(server)
             # If we're a backup, we need to start an election
 
+    def apply_committed(self, server):
+        while self._running:
+            # Save everything that's been committed in case of crash
+            if server.commitIndex > self.last_written:
+                with open(self.log_file, 'w') as log_file:
+                    new_log_file = [ utils.log_entry_to_dict(entry) for entry in server.log.values() if entry.index <= server.commitIndex ]
+                    json.dump(new_log_file, log_file)
+                self.last_written = server.commitIndex
+            # ... actually apply all committed changes
+            if server.commitIndex > server.lastApplied:
+                to_apply = server.log[server.lastApplied + 1]
+                print(f"### APPLYING index {to_apply.index}: {to_apply.opcode} {to_apply.key} {to_apply.val} ###")
+                if to_apply.opcode == "set":
+                    server.db.set(to_apply.key, to_apply.val)
+                server.lastApplied += 1
+
     def primary_heartbeat(self, server):
         """heartbeat"""
         while self._running:
             # Only run if leader
             if server.leader != server.identifier: continue 
 
+            # Send heartbeat to all replicas every heartbeat_rate
             if time.time_ns() - server.lastHeartbeat >= self.heartbeat_rate:
                 server.lastHeartbeat = time.time_ns()
                 for replica in server.replicas:
@@ -337,21 +354,30 @@ class Replica():
                             res = replica_server.AppendEntries(raft_pb2.AppendEntriesRequest(
                                 term=server.currentTerm,
                                 leader_id=str(server.identifier),
-                                prev_log_index=server.lastApplied,
+                                prev_log_index=list(server.log)[-1] if server.log else 0,
                                 prev_log_term=server.currentTerm,
                                 entries=[],
                                 leader_commit=server.commitIndex
                             ))
                         except grpc.RpcError as e:
                             if e.code() != grpc.StatusCode.UNAVAILABLE and not (e.code() == grpc.StatusCode.INTERNAL and "serialize" in e.details()):
-                                print(f"Error: {e.code()} - {e.details()}")
+                                print(f"Heartbeat Error: {e.code()} - {e.details()}")
 
 
     def start(self):
         """Start the replica server"""
         try:
+            try:
+                # Read old logs if exists
+                with open(self.log_file, 'r') as log_file:
+                    old_logs = json.load(log_file)
+                    self.last_written = old_logs[-1]["index"]
+                    self.rpc_servicer = SequenceServicer(self.identifier, self.leader, self.other_replicas, old_logs={ entry["index"]: utils.dict_to_log_entry(entry) for entry in old_logs } )
+            except FileNotFoundError:
+                print(f"No log file for the current server {self.identifier}.")
+                self.rpc_servicer = SequenceServicer(self.identifier, self.leader, self.other_replicas)
+
             self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
-            self.rpc_servicer = SequenceServicer(self.identifier, self.leader, self.other_replicas)
             replication_pb2_grpc.add_SequenceServicer_to_server(self.rpc_servicer, self.server)
             self.server.add_insecure_port(f'[::]:{self.identifier}')
 
@@ -363,6 +389,9 @@ class Replica():
             # Start watching for election timeouts
             self.election_thread = threading.Thread(target=self.election_timeout, args=[self.rpc_servicer])
             self.election_thread.start()
+            # Make sure you apply everything
+            self.apply_thread = threading.Thread(target=self.apply_committed, args=[self.rpc_servicer])
+            self.apply_thread.start()
             # Start server
             self.server.start()
             self.server.wait_for_termination()
