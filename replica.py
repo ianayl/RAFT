@@ -122,40 +122,17 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             numReplicated = len([ n for n in self.matchIndex.values() if n >= i ])
             if numReplicated >= len(self.replicas) // 2 and self.log[i].term == self.currentTerm:
                 self.commitIndex = i
-                print(f"Committing index {i}...")
-                self.apply_log()
+                print(f"Consensus reached: committing index {i}.")
                 break
         else:
             print("No consensus.")
 
-            
-        # potential_N = [ n for n in self.matchIndex.values()
-        #                   if n > self.commitIndex and
-        #                      sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ]) >= (len(self.matchIndex) // 2) and
-        #                      self.log[n].term == self.currentTerm ]
-        # if potential_N:
-        #     for i in range(self.commitIndex + 1, max(potential_N) + 1):
-        #         if i in self.log:
-        #             print(f"{self.log[i].opcode} {self.log[i].key} {self.log[i].val}")
-        #     self.commitIndex = max(potential_N)
-
-        # max_n, max_majority = -1, -1
-        # for n in potential_N:
-        #     majority = sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ])
-        #     if majority >= (len(self.matchIndex) / 2):
-        #         max_n, max_majority = n, majority
-        # if max_n != -1:
-        #     for ()
-        #         print(f"{entry.opcode} {entry.key} {entry.val}")
-        #     commitIndex = max_n
-
         return replication_pb2.WriteResponse(ack=ACK)
-            
 
     def apply_log(self):
         for i in range(self.lastApplied + 1, self.commitIndex + 1):
-            # TODO apply log here
             pass
+            # TODO apply log here
         self.lastApplied = self.commitIndex
             
     def _delete_after_index(self, index: int):
@@ -163,6 +140,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             if i >= index: del self.log[i]
 
     def AppendEntries(self, req, ctx):
+        if req.entries:
+            print("New AppendEntries request:")
         # I received something from a leader, acknowledge that leader instead
         self.lastHeartbeat = time.time_ns()
         if self.leader != int(req.leader_id):
@@ -171,10 +150,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             self.currentTerm = req.term
         #print(f"{self.identifier}: received heartbeat from {self.leader}")
 
-        if not req.entries:
-            return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
-
-        print(f"NOTE: ({req.entries})")
+        # if not req.entries:
+        #     return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
 
         # Reply false if term < currentTerm
         if req.term < self.currentTerm:
@@ -198,12 +175,13 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             if entry.index not in self.log:
                 self.log[entry.index] = entry
                 # TODO add to db here
-                print(f"{entry.opcode} {entry.key} {entry.val}")
+                print(f"Appended new entry to log: {entry.opcode} {entry.key} {entry.val}")
 
         # If leaderCommit > commitIndex, set:
         #     commitIndex = min(leaderCommit, index of last new entry)
         if req.leader_commit > self.commitIndex:
-            self.commitIndex = min(req.leader_commit, req.entries[-1].index)
+            self.commitIndex = min(req.leader_commit, self.log[-1].index)
+            print(f"{self.identifier}: Commited up to {self.commitIndex}")
 
         return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
 
@@ -274,13 +252,13 @@ class Replica():
                     res = replica_server.RequestVote(raft_pb2.RequestVoteRequest(
                         term=server.currentTerm,
                         candidate_id=str(server.identifier),
-                        last_log_index=server.lastApplied
+                        last_log_index=list(server.log)[-1] if server.log else 0,
                     ))
                     if res.vote_granted:
                         votes += 1
                 except grpc.RpcError as e:
                     if e.code() != grpc.StatusCode.UNAVAILABLE and not (e.code() == grpc.StatusCode.INTERNAL and "serialize" in e.details()):
-                        print(f"Error: {e.code()} - {e.details()}")
+                        print(f"Vote Request Error: {e.code()} - {e.details()}")
                     numReplicas -= 1
         
         # If votes > n/2, become primary
@@ -294,17 +272,17 @@ class Replica():
                         res = replica_server.AppendEntries(raft_pb2.AppendEntriesRequest(
                             term=server.currentTerm,
                             leader_id=str(server.identifier),
-                            prev_log_index=server.lastApplied,
+                            prev_log_index=list(server.log)[-1] if server.log else 0,
                             prev_log_term=server.currentTerm,
                             entries=[],
                             leader_commit=server.commitIndex
                         ))
                     except grpc.RpcError as e:
                         if e.code() != grpc.StatusCode.UNAVAILABLE and not (e.code() == grpc.StatusCode.INTERNAL and "serialize" in e.details()):
-                            print(f"Error: {e.code()} - {e.details()}")
+                            print(f"Leader Confirmation Error: {e.code()} - {e.details()}")
 
             # Reset leader states
-            server.nextIndex = { replica: server.lastApplied + 1 for replica in server.replicas if replica != server.identifier}
+            server.nextIndex = { replica: list(server.log)[-1] + 1 if server.log else 1 for replica in server.replicas if replica != server.identifier}
             server.matchIndex = { replica: 0 for replica in server.replicas if replica != server.identifier}
             print(f"{server.identifier}: Elected primary for term {server.currentTerm}.")
 
@@ -334,17 +312,19 @@ class Replica():
                     with grpc.insecure_channel(f"localhost:{replica}") as channel:
                         replica_server = replication_pb2_grpc.SequenceStub(channel)
                         try:
+                            print(f"{server.identifier} (primary): sending heartbeat to {replica}.")
+                            print(f"Prev log index: {list(server.log)[-1] if server.log else 0}")
                             res = replica_server.AppendEntries(raft_pb2.AppendEntriesRequest(
                                 term=server.currentTerm,
                                 leader_id=str(server.identifier),
-                                prev_log_index=server.lastApplied,
+                                prev_log_index=list(server.log)[-1] if server.log else 0,
                                 prev_log_term=server.currentTerm,
                                 entries=[],
                                 leader_commit=server.commitIndex
                             ))
                         except grpc.RpcError as e:
                             if e.code() != grpc.StatusCode.UNAVAILABLE and not (e.code() == grpc.StatusCode.INTERNAL and "serialize" in e.details()):
-                                print(f"Error: {e.code()} - {e.details()}")
+                                print(f"Heartbeat Error: {e.code()} - {e.details()}")
 
 
     def start(self):
