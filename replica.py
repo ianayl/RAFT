@@ -4,6 +4,8 @@ import time
 from concurrent import futures
 import replication_pb2
 import replication_pb2_grpc
+import raft_pb2
+import raft_pb2_grpc
 import random
 # import heartbeat_service_pb2
 # import heartbeat_service_pb2_grpc
@@ -37,8 +39,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         self.lastApplied = 0
 
         # Volatile leader states
-        self.nextIndex = dict()    # pair of (server index, next log index)
-        self.matchIndex = dict()   # pair of (server index, highest log entry replicated)
+        self.nextIndex  = { rep: self.commitIndex + 1 for rep in replicas }  # pair of (server index, next log index)
+        self.matchIndex = { rep: 0                    for rep in replicas }  # pair of (server index, highest log entry replicated)
 
         self.lastHeartbeat = time.time_ns()
     
@@ -66,25 +68,26 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             return replication_pb2.WriteResponse(ack=ACK)
 
         # I am the leader: append to log, and ask others to append:
-        self.log.append(replication_pb2.LogEntry(
+        self.log[self.commitIndex + 1] = raft_pb2.LogEntry(
             index  = self.commitIndex + 1,
             term   = self.currentTerm,
             opcode = "set",
             key    = req.key,
-            val    = req.val
-        ))
+            val    = req.value
+        )
 
         for rep_id in [ rep for rep in self.replicas if rep != self.identifier ]:
             while True:
-                new_entries = [ entry for entry in self.log if entry.index >= self.nextIndex[rep_id] ]
-                if new_entries.empty(): break
+                print(self.nextIndex)
+                new_entries = [ entry for entry in self.log.values() if entry.index >= self.nextIndex[rep_id] ]
+                if not new_entries: break
 
                 with grpc.insecure_channel(f"localhost:{rep_id}") as channel:
-                    print(f"{self.identity} (leader): Writing to {rep_id}...")
+                    print(f"{self.identifier} (leader): Writing to {rep_id}...")
                     replica_stub = replication_pb2_grpc.SequenceStub(channel)
                     try:
                         res = replica_stub.AppendEntries(
-                                replication_pb2.AppendEntriesRequest(
+                                raft_pb2.AppendEntriesRequest(
                                     term=self.currentTerm,
                                     leader_id=self.identifier,
                                     prev_log_index=self.nextIndex[rep_id],
@@ -95,8 +98,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
                               )
                         if res.success:
                             # TODO this is sussy
-                            self.nextIndex[rep_id]  = self.commitIndex + 2;
-                            self.matchIndex[rep_id] = self.commitIndex + 1;
+                            self.nextIndex[rep_id]  = self.commitIndex + 2
+                            self.matchIndex[rep_id] = self.commitIndex + 1
                             break
                         else:
                             self.nextIndex[rep_id] -= 1
@@ -128,12 +131,12 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
     def AppendEntries(self, req, ctx):
         # Reply false if term < currentTerm
         if req.term < self.currentTerm:
-            return replication_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
+            return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
         # Reply false if log doesn’t contain an entry at prevLogIndex whose term matches
         # prevLogTerm
         if self.log[req.prev_log_index].term != req.prev_log_term:
-            return replication_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
+            return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
         # If an existing entry conflicts with a new one (same index but different terms),
         # delete the existing entry and all that follow it
@@ -153,13 +156,13 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
     def RequestVote(self, request, context):
         # If request is from an older term, reject it
         if request.term < self.currentTerm:
-            return replication_pb2.RequestVoteResponse(term=self.currentTerm, vote_granted=False)
+            return raft_pb2.RequestVoteResponse(term=self.currentTerm, vote_granted=False)
         
         # If I haven't voted yet, vote for the candidate
         if (self.votedFor is None or self.votedFor == request.candidate_id) and \
             (request.last_log_index >= self.lastApplied):
             self.votedFor = request.candidate_id
-            return replication_pb2.RequestVoteResponse(term=self.currentTerm, vote_granted=True)
+            return raft_pb2.RequestVoteResponse(term=self.currentTerm, vote_granted=True)
 
 class Replica():
     """Base class for all replicas"""
@@ -206,7 +209,7 @@ class Replica():
             with grpc.insecure_channel(replica) as channel:
                 replica_server = replication_pb2_grpc.SequenceStub(channel)
                 try:
-                    res = replica_server.RequestVote(replication_pb2.RequestVoteRequest(
+                    res = replica_server.RequestVote(raft_pb2.RequestVoteRequest(
                         term=server.currentTerm,
                         candidate_id=server.identifier,
                         last_log_index=server.lastApplied
@@ -223,7 +226,7 @@ class Replica():
                 with grpc.insecure_channel(replica) as channel:
                     replica_server = replication_pb2_grpc.SequenceStub(channel)
                     try:
-                        res = replica_server.AppendEntries(replication_pb2.AppendEntriesRequest(
+                        res = replica_server.AppendEntries(raft_pb2.AppendEntriesRequest(
                             term=server.currentTerm,
                             leader_id=server.identifier,
                             prev_log_index=server.lastApplied,
