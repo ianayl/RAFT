@@ -20,6 +20,11 @@ import utils
 NAK="NAK"
 ACK="ACK"
 
+# Timeouts in ms
+TIMEOUT_LOWER_BOUND = 150
+TIMEOUT_UPPER_BOUND = 300
+HEARTBEAT_RATE = 50
+
 
 class SequenceServicer(replication_pb2_grpc.SequenceServicer):
     def __init__(self, identifier: int, leader: int, replicas: list, old_logs: dict = dict()):
@@ -247,8 +252,8 @@ class Replica():
         random.seed(time.time_ns())
 
         # Election timeout
-        self.timeout = random.randrange(150, 300) * 1000000 * 10 # 150-300ms converted to ns
-        self.heartbeat_rate = 50000000 * 10 # 50ms converted to ns
+        self.timeout = random.randrange(TIMEOUT_LOWER_BOUND, TIMEOUT_UPPER_BOUND) * 1000000 * 10 # 150-300ms converted to ns, multiplied by 10 for testing
+        self.heartbeat_rate = HEARTBEAT_RATE * 1000000 * 10 # 50ms converted to ns, multiplied by 10 for testing
 
         # Last log entry written to the log file
         self.last_written = -1
