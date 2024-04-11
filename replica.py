@@ -143,6 +143,10 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             if i >= index: del self.log[i]
 
     def AppendEntries(self, req, ctx):
+        # I received something from a leader, acknowledge that leader instead
+        self.lastHeartbeat = time.time_ns()
+        new_leader(int(req.leader_id))
+
         # Reply false if term < currentTerm
         if req.term < self.currentTerm:
             return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
@@ -206,6 +210,7 @@ class Replica():
 
         # Election timeout
         self.timeout = random.randrange(150, 300) * 1000000 # 150-300ms converted to ns
+        self.heartbeat_rate = 50000000 # 50ms converted to ns
 
     # def ping_heartbeat(self):
     #     while self._running:
@@ -246,12 +251,12 @@ class Replica():
             server.leader = server.identifier
             # Send empty AppendEntries RPCs to all other servers
             for replica in server.replicas:
-                with grpc.insecure_channel(replica) as channel:
+                with grpc.insecure_channel(f"localhost:{replica}") as channel:
                     replica_server = replication_pb2_grpc.SequenceStub(channel)
                     try:
                         res = replica_server.AppendEntries(raft_pb2.AppendEntriesRequest(
                             term=server.currentTerm,
-                            leader_id=server.identifier,
+                            leader_id=str(server.identifier),
                             prev_log_index=server.lastApplied,
                             prev_log_term=server.currentTerm,
                             entries=[],
@@ -277,6 +282,32 @@ class Replica():
                 self.start_election(server)
             # If we're a backup, we need to start an election
 
+    def primary_heartbeat(self, server):
+        """heartbeat"""
+        while self._running:
+            # Only run if leader
+            if server.leader != server.identifier: continue 
+
+            if time.time_ns() - server.lastHeartbeat >= self.heartbeat:
+                server.lastHeartbeat = time.time_ns()
+                print(f"Sending heartbeat!")
+                for replica in server.replicas:
+                    if replica == server.identifier: continue
+                    with grpc.insecure_channel(f"localhost:{replica}") as channel:
+                        replica_server = replication_pb2_grpc.SequenceStub(channel)
+                        try:
+                            res = replica_server.AppendEntries(raft_pb2.AppendEntriesRequest(
+                                term=server.currentTerm,
+                                leader_id=str(server.identifier),
+                                prev_log_index=server.lastApplied,
+                                prev_log_term=server.currentTerm,
+                                entries=[],
+                                leader_commit=server.commitIndex
+                            ))
+                        except grpc.RpcError as e:
+                            print(f"Error: {e.code()} - {e.details()}")
+
+
     def start(self):
         """Start the replica server"""
         self.server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
@@ -285,13 +316,11 @@ class Replica():
         self.server.add_insecure_port(f'[::]:{self.identifier}')
 
         self._running = True
-        # TODO periodically ping primary instead!
-        # if self.heartbeat_port is not None:
-        #     heartbeat_ping_thread = threading.Thread(target=self.ping_heartbeat)
-        #     heartbeat_ping_thread.start()
 
+        # Start heartbeat
+        self.heartbeat_thread = threading.Thread(target=self.primary_heartbeat(self.server))
+        self.heartbeat_ping_thread.start()
+        # Start server
         self.server.start()
         self.server.wait_for_termination()
         self._running = False
-       #  if self.heartbeat_port is not None:
-       #      heartbeat_ping_thread.wait_for_termination()
