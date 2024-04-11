@@ -325,9 +325,11 @@ class Replica():
                 self.last_written = server.commitIndex
             # ... actually apply all committed changes
             if server.commitIndex > server.lastApplied:
-                server.lastApplied += 1
-                to_apply = server.log[server.lastApplied]
+                to_apply = server.log[server.lastApplied + 1]
                 print(f"### APPLYING index {to_apply.index}: {to_apply.opcode} {to_apply.key} {to_apply.val} ###")
+                if to_apply.opcode == "set":
+                    server.db.set(to_apply.key, to_apply.val)
+                server.lastApplied += 1
 
     def primary_heartbeat(self, server):
         """heartbeat"""
