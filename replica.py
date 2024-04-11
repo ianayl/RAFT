@@ -78,22 +78,23 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         for rep_id in [ rep for rep in self.replicas if rep != self.identifier ]:
             while True:
-                print("next index:", self.nextIndex)
-                print("target:", self.nextIndex[rep_id])
-                print("logs:", self.log.values())
+                # print("next index:", self.nextIndex)
+                # print("target:", self.nextIndex[rep_id])
+                # print("logs:", self.log.values())
                 new_entries = [ entry for entry in self.log.values() if entry.index >= self.nextIndex[rep_id] ]
                 # print(type(new_entries[0]))
                 # print(type(self.log[1]))
                 if not new_entries: break
 
                 with grpc.insecure_channel(f"localhost:{rep_id}") as channel:
-                    print(f"{self.identifier} (leader): Writing to {rep_id}...")
+                    print(f"{self.identifier} (leader): Writing to {rep_id} @ index {self.nextIndex[rep_id]}.")
+                    print(f"Sending entries: {list(new_entries)}")
                     replica_stub = replication_pb2_grpc.SequenceStub(channel)
                     try:
                         not_stupid = raft_pb2.AppendEntriesRequest(
                                     term=self.currentTerm,
                                     leader_id=f"{self.identifier}",
-                                    prev_log_index=self.matchIndex[rep_id],
+                                    prev_log_index=self.nextIndex[rep_id] - 1,
                                     prev_log_term=self.log[self.nextIndex[rep_id]].term,
                                     entries=new_entries,
                                     leader_commit=self.commitIndex
@@ -101,10 +102,13 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
                         res = replica_stub.AppendEntries(not_stupid)
                         if res.success:
                             # TODO this is sussy
+                            print(f"AppendEntries succeeded for {rep_id}!")
                             self.nextIndex[rep_id]  = self.commitIndex + 2
                             self.matchIndex[rep_id] = self.commitIndex + 1
                             break
                         else:
+                            # If AppendEntries fails, decrement nextIndex and try again
+                            print(f"AppendEntries failed for {rep_id}! Decrementing nextIndex...")
                             self.nextIndex[rep_id] -= 1
                     except grpc.RpcError as e:
                         # If replica is offline, I can just skip
@@ -161,8 +165,14 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         # Reply false if log doesn’t contain an entry at prevLogIndex whose term matches
         # prevLogTerm
-        if req.prev_log_index != 0 and self.log and (req.prev_log_index not in self.log or self.log[req.prev_log_index].term != req.prev_log_term):
-            print(f"{self.identifier}: {self.log} has at prev_log_index {req.prev_log_index} is term {None if req.prev_log_index not in self.log else self.log[req.prev_log_index].term} (prev_log_term is {req.prev_log_term})")
+        print(f">0: {req.prev_log_index > 0}")
+        if req.prev_log_index > 0:
+            print(f"prev_log_index: {req.prev_log_index}")
+        print(f"not in log: {req.prev_log_index not in self.log}")
+        if self.log:
+            print(f"term mismatch: {self.log[req.prev_log_index].term != req.prev_log_term}")
+        if req.prev_log_index > 0 and (req.prev_log_index not in self.log or self.log[req.prev_log_index].term != req.prev_log_term):
+            print(f"{self.identifier}: Log does not contain entry at {req.prev_log_index} with term {req.prev_log_term}")
             return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
         # If an existing entry conflicts with a new one (same index but different terms),
