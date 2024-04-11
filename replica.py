@@ -80,22 +80,26 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             while True:
                 print(self.nextIndex)
                 new_entries = [ entry for entry in self.log.values() if entry.index >= self.nextIndex[rep_id] ]
+                print(type(new_entries[0]))
+                print(type(self.log[1]))
                 if not new_entries: break
 
                 with grpc.insecure_channel(f"localhost:{rep_id}") as channel:
                     print(f"{self.identifier} (leader): Writing to {rep_id}...")
                     replica_stub = replication_pb2_grpc.SequenceStub(channel)
                     try:
-                        res = replica_stub.AppendEntries(
-                                raft_pb2.AppendEntriesRequest(
+                        print("sane")
+                        not_stupid = raft_pb2.AppendEntriesRequest(
                                     term=self.currentTerm,
-                                    leader_id=self.identifier,
+                                    leader_id=str(self.identifier),
                                     prev_log_index=self.nextIndex[rep_id],
                                     prev_log_term=self.log[self.nextIndex[rep_id]].term,
                                     entries=new_entries,
                                     leader_commit=self.commitIndex
                                 )
-                              )
+                        print("sane1")
+                        res = replica_stub.AppendEntries(not_stupid)
+                        print("sane2")
                         if res.success:
                             # TODO this is sussy
                             self.nextIndex[rep_id]  = self.commitIndex + 2
