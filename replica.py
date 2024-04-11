@@ -123,6 +123,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             if numReplicated >= len(self.replicas) // 2 and self.log[i].term == self.currentTerm:
                 self.commitIndex = i
                 print(f"Consensus reached: committing index {i}.")
+                print(f"Log is now {self.log}")
                 break
         else:
             print("No consensus.")
@@ -182,6 +183,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         if req.leader_commit > self.commitIndex:
             self.commitIndex = min(req.leader_commit, list(self.log)[-1] if self.log else 0)
             print(f"{self.identifier}: Commited up to {self.commitIndex}")
+            print(f"{self.identifier}: Log is now {self.log}")
 
         return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
 
@@ -195,7 +197,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         
         # If I haven't voted yet, vote for the candidate
         if (self.votedFor is None or self.votedFor == request.candidate_id) and \
-            (request.last_log_index >= self.lastApplied):
+            (request.last_log_index >= list(self.log)[-1] if self.log else 0):
             self.votedFor = request.candidate_id
             return raft_pb2.RequestVoteResponse(term=self.currentTerm, vote_granted=True)
 
@@ -312,10 +314,10 @@ class Replica():
                     with grpc.insecure_channel(f"localhost:{replica}") as channel:
                         replica_server = replication_pb2_grpc.SequenceStub(channel)
                         try:
-                            print(f"{server.identifier} (primary): sending heartbeat to {replica}.")
-                            print(f"Prev log index: {list(server.log)[-1] if server.log else 0}")
-                            print(f"Prev log term: {server.currentTerm}")
-                            print(f"Leader commit: {server.commitIndex}")
+                            # print(f"{server.identifier} (primary): sending heartbeat to {replica}.")
+                            # print(f"Prev log index: {list(server.log)[-1] if server.log else 0}")
+                            # print(f"Prev log term: {server.currentTerm}")
+                            # print(f"Leader commit: {server.commitIndex}")
                             res = replica_server.AppendEntries(raft_pb2.AppendEntriesRequest(
                                 term=server.currentTerm,
                                 leader_id=str(server.identifier),
