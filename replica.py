@@ -44,8 +44,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         self.lastHeartbeat = time.time_ns()
     
-    def new_leader(self, leader_id: int):
-        self.leader = leader_id
+    # def new_leader(self, leader_id: int):
+    #     self.leader = leader_id
 
     def Write(self, req, ctx):
         # If I am not the leader, redirect:
@@ -145,7 +145,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
     def AppendEntries(self, req, ctx):
         # I received something from a leader, acknowledge that leader instead
         self.lastHeartbeat = time.time_ns()
-        self.new_leader(int(req.leader_id))
+        self.leader = int(req.leader_id)
 
         # Reply false if term < currentTerm
         if req.term < self.currentTerm:
@@ -236,12 +236,12 @@ class Replica():
 
         # Request votes from all other servers
         for replica in server.replicas:
-            with grpc.insecure_channel(replica) as channel:
+            with grpc.insecure_channel(f"localhost:{replica}") as channel:
                 replica_server = replication_pb2_grpc.SequenceStub(channel)
                 try:
                     res = replica_server.RequestVote(raft_pb2.RequestVoteRequest(
                         term=server.currentTerm,
-                        candidate_id=server.identifier,
+                        candidate_id=str(server.identifier),
                         last_log_index=server.lastApplied
                     ))
                     if res.vote_granted:
@@ -291,9 +291,8 @@ class Replica():
             # Only run if leader
             if server.leader != server.identifier: continue 
 
-            if time.time_ns() - server.lastHeartbeat >= self.heartbeat:
+            if time.time_ns() - server.lastHeartbeat >= self.heartbeat_rate:
                 server.lastHeartbeat = time.time_ns()
-                print(f"Sending heartbeat!")
                 for replica in server.replicas:
                     if replica == server.identifier: continue
                     with grpc.insecure_channel(f"localhost:{replica}") as channel:
@@ -320,9 +319,13 @@ class Replica():
 
         self._running = True
 
-        # Start heartbeat
-        self.heartbeat_thread = threading.Thread(target=self.primary_heartbeat, args=[self.server])
+        print(self.server)
+        # Start heartbeat thread -- will send heartbeats if server ever becomes primary
+        self.heartbeat_thread = threading.Thread(target=self.primary_heartbeat, args=[self.rpc_servicer])
         self.heartbeat_thread.start()
+        # Start watching for election timeouts
+        self.election_thread = threading.Thread(target=self.election_timeout, args=[self.rpc_servicer])
+        self.election_thread.start()
         # Start server
         self.server.start()
         self.server.wait_for_termination()
