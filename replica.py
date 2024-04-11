@@ -78,10 +78,10 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         for rep_id in [ rep for rep in self.replicas if rep != self.identifier ]:
             while True:
-                print(self.nextIndex)
+                print("next index:", self.nextIndex)
                 new_entries = [ entry for entry in self.log.values() if entry.index >= self.nextIndex[rep_id] ]
-                print(type(new_entries[0]))
-                print(type(self.log[1]))
+                # print(type(new_entries[0]))
+                # print(type(self.log[1]))
                 if not new_entries: break
 
                 with grpc.insecure_channel(f"localhost:{rep_id}") as channel:
@@ -156,7 +156,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
 
         # Reply false if log doesn’t contain an entry at prevLogIndex whose term matches
         # prevLogTerm
-        if self.log and self.log[req.prev_log_index].term != req.prev_log_term:
+        if self.log and (req.prev_log_index not in self.log or self.log[req.prev_log_index].term != req.prev_log_term):
             return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=False)
 
         # If an existing entry conflicts with a new one (same index but different terms),
@@ -329,7 +329,6 @@ class Replica():
 
             self._running = True
 
-            print(self.server)
             # Start heartbeat thread -- will send heartbeats if server ever becomes primary
             self.heartbeat_thread = threading.Thread(target=self.primary_heartbeat, args=[self.rpc_servicer])
             self.heartbeat_thread.start()
