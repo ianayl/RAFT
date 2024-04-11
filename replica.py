@@ -39,8 +39,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         self.lastApplied = 0
 
         # Volatile leader states
-        self.nextIndex  = { rep: self.commitIndex + 1 for rep in replicas }  # pair of (server index, next log index)
-        self.matchIndex = { rep: 0                    for rep in replicas }  # pair of (server index, highest log entry replicated)
+        self.nextIndex  = { rep: self.commitIndex + 1 for rep in replicas if rep != self.identifier }  # pair of (server index, next log index)
+        self.matchIndex = { rep: 0                    for rep in replicas if rep != self.identifier }  # pair of (server index, highest log entry replicated)
 
         self.lastHeartbeat = time.time_ns()
     
@@ -79,6 +79,8 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
         for rep_id in [ rep for rep in self.replicas if rep != self.identifier ]:
             while True:
                 print("next index:", self.nextIndex)
+                print("target:", self.nextIndex[rep_id])
+                print("logs:", self.log.values())
                 new_entries = [ entry for entry in self.log.values() if entry.index >= self.nextIndex[rep_id] ]
                 # print(type(new_entries[0]))
                 # print(type(self.log[1]))
@@ -91,7 +93,7 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
                         not_stupid = raft_pb2.AppendEntriesRequest(
                                     term=self.currentTerm,
                                     leader_id=f"{self.identifier}",
-                                    prev_log_index=self.nextIndex[rep_id],
+                                    prev_log_index=self.matchIndex[rep_id],
                                     prev_log_term=self.log[self.nextIndex[rep_id]].term,
                                     entries=new_entries,
                                     leader_commit=self.commitIndex
@@ -116,15 +118,23 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
                         break
         # If there exists an N such that N > commitIndex, a majority of
         # matchIndex[i] ≥ N, and log[N].term == currentTerm: set commitIndex = N
-        potential_N = [ n for n in self.matchIndex.values()
-                          if n > self.commitIndex and
-                             sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ]) >= (len(self.matchIndex) / 2) and
-                             self.log[n].term == self.currentTerm ]
-        if potential_N:
-            for i in range(self.commitIndex, max(potential_N) + 1):
-                if i in self.log:
-                    print(f"{self.log[i].opcode} {self.log[i].key} {self.log[i].val}")
-            self.commitIndex = max(potential_N)
+        for i in range(max(self.matchIndex.values()), self.commitIndex, -1):
+            numReplicated = len([ n for n in self.matchIndex.values() if n >= i ])
+            if numReplicated >= len(self.replicas) // 2 and self.log[i].term == self.currentTerm:
+                self.commitIndex = i
+                break
+
+
+        # potential_N = [ n for n in self.matchIndex.values()
+        #                   if n > self.commitIndex and
+        #                      sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ]) >= (len(self.matchIndex) // 2) and
+        #                      self.log[n].term == self.currentTerm ]
+        # if potential_N:
+        #     for i in range(self.commitIndex + 1, max(potential_N) + 1):
+        #         if i in self.log:
+        #             print(f"{self.log[i].opcode} {self.log[i].key} {self.log[i].val}")
+        #     self.commitIndex = max(potential_N)
+
         # max_n, max_majority = -1, -1
         # for n in potential_N:
         #     majority = sum([ 1 if match_i >= n else 0 for match_i in self.matchIndex.values() ])
@@ -149,6 +159,11 @@ class SequenceServicer(replication_pb2_grpc.SequenceServicer):
             print(f"{self.identifier}: Changing leader to {req.leader_id}")
             self.leader = int(req.leader_id)
         #print(f"{self.identifier}: received heartbeat from {self.leader}")
+
+        if not req.entries:
+            return raft_pb2.AppendEntriesResponse(term=self.currentTerm, success=True)
+
+        print(f"NOTE: ({req.entries})")
 
         # Reply false if term < currentTerm
         if req.term < self.currentTerm:
