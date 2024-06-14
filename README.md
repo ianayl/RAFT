@@ -1,5 +1,5 @@
-# CS 4459 - RAFT Election Algorithm
-A performance-focused distributed Redis network using the RAFT election algorithm for replication and consistency.
+# CPR - Redis RAFT Election Algorithm
+A performance-oriented distributed Redis network using the RAFT election algorithm for replication and consistency.
 
 ## Instructions
 - Run `make` to generate any missing gRPC files from the provided proto files.
